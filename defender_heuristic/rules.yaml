@@ -1,0 +1,40 @@
+thresholds:
+  alert: 45
+  freeze: 70
+  high_entropy: 6.5
+
+weights:
+  tracked_memfd_execveat: 70
+  untracked_empty_path_execveat: 45
+  proc_fd_execve: 70
+  memfd_deleted_exe: 20
+  high_entropy: 25
+  kthread_masquerade: 45
+  memfd_plus_prctl_rename: 30
+  allowlisted_parent: -60
+
+kthread_prefixes:
+  - "[kworker"
+  - "[ksoftirqd"
+  - "[migration"
+  - "[rcu_"
+  - "[kswapd"
+  - "[watchdog"
+  - "[cpuhp"
+  - "[systemd"
+
+allowlist_comms:
+  - pipewire
+  - pipewire-pulse
+  - wireplumber
+  - pulseaudio
+  - Xwayland
+  - kwin_wayland
+  - gnome-shell
+  - sway
+  - Hyprland
+  - firefox
+  - chromium
+  - chrome
+  - brave
+  - electron

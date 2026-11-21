@@ -1,0 +1,7 @@
+red_team/build/
+ebpf/build/
+ebpf/vmlinux.h
+logs/
+__pycache__/
+*.pyc
+*.o
