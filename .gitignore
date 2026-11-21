@@ -5,3 +5,6 @@ logs/
 __pycache__/
 *.pyc
 *.o
+ui/frontend/node_modules/
+ui/frontend/dist/
+.hallmark/
