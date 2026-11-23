@@ -920,6 +920,59 @@
   max-width: 60ch;
 }
 
+.ml-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.ml-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.ml-panel__copy,
+.ml-panel__features {
+  color: var(--color-ink-2);
+  font-size: var(--text-sm);
+}
+
+.ml-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-inner);
+  background: var(--color-paper);
+}
+
+.ml-stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  min-width: 0;
+}
+
+.ml-stat__val {
+  font-family: var(--font-display);
+  font-weight: var(--display-weight);
+  font-size: var(--text-xl);
+  color: var(--color-ink);
+}
+
+.ml-table td,
+.ml-table th {
+  padding-block: var(--space-xs);
+}
+
+@media (max-width: 48rem) {
+  .ml-stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .confirm-dialog {
   position: fixed;
   inset: 0;

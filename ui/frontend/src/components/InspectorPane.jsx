@@ -74,6 +74,24 @@ export default function InspectorPane({
                   ? `${selected.mtti_ms.toFixed(3)} ms`
                   : "not mitigated"}
               </dd>
+
+              {selected.heuristic && (
+                <>
+                  <dt>Heuristic engine</dt>
+                  <dd className="num">
+                    {selected.heuristic.action} (score {selected.heuristic.score}, {selected.heuristic.infer_ms?.toFixed(3) ?? "0.000"} ms)
+                  </dd>
+                </>
+              )}
+
+              {selected.ml && (
+                <>
+                  <dt>ML engine</dt>
+                  <dd className="num">
+                    {selected.ml.action} ({(selected.ml.prob * 100).toFixed(1)}%, {selected.ml.infer_ms?.toFixed(3) ?? "0.000"} ms)
+                  </dd>
+                </>
+              )}
             </dl>
 
             {selected.reasons && selected.reasons.length > 0 && (

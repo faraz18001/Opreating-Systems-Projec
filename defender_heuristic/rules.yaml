@@ -38,3 +38,6 @@ allowlist_comms:
   - chrome
   - brave
   - electron
+  - runc
+  - systemd
+  - systemd-executor

@@ -8,15 +8,32 @@ import sys
 import time
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from classifier import HeuristicClassifier
 from mitigator import freeze_process
 from telemetry import collect_context
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SENSOR = PROJECT_ROOT / "ebpf" / "build" / "sensor"
 DEFAULT_BPF_OBJ = PROJECT_ROOT / "ebpf" / "build" / "probes.bpf.o"
 DEFAULT_RULES = Path(__file__).resolve().parent / "rules.yaml"
+DEFAULT_MODEL = PROJECT_ROOT / "defender_ml" / "model.joblib"
 DEFAULT_LOG = PROJECT_ROOT / "logs" / "defender_events.jsonl"
+
+
+def _load_ml_classifier(model_path: Path, rules_path: Path, required: bool):
+    try:
+        from defender_ml.classifier import MLClassifier
+
+        return MLClassifier(model_path=model_path, rules_path=rules_path)
+    except Exception as exc:
+        if required:
+            sys.stderr.write(f"error: unable to load ML classifier ({exc}).\n")
+            sys.stderr.write("hint: install scikit-learn/joblib and run 'python3 defender_ml/train.py'.\n")
+            raise
+        return None
 
 
 def run_defender(args: argparse.Namespace) -> int:
@@ -29,7 +46,17 @@ def run_defender(args: argparse.Namespace) -> int:
         return 1
 
     args.log.parent.mkdir(parents=True, exist_ok=True)
-    classifier = HeuristicClassifier(args.rules)
+    heur_clf = HeuristicClassifier(args.rules)
+
+    ml_clf = None
+    if args.engine == "ml":
+        try:
+            ml_clf = _load_ml_classifier(args.model, args.rules, required=True)
+        except Exception:
+            return 1
+    elif not args.no_shadow and args.model.exists():
+        ml_clf = _load_ml_classifier(args.model, args.rules, required=False)
+
     own_pid = os.getpid()
 
     proc = subprocess.Popen(
@@ -52,7 +79,8 @@ def run_defender(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, _handle_stop)
 
     mode = "dry-run" if args.dry_run else "active-sigstop"
-    print(f"[defender] listening via {args.sensor} (mode={mode})", flush=True)
+    shadow_str = "on" if (ml_clf is not None) else "off"
+    print(f"[defender] listening via {args.sensor} (engine={args.engine}, mode={mode}, shadow={shadow_str})", flush=True)
 
     with open(args.log, "a", encoding="utf-8") as log_file:
         assert proc.stdout is not None
@@ -77,7 +105,16 @@ def run_defender(args: argparse.Namespace) -> int:
                 fd=int(event.get("fd", -1)),
                 inspect_entropy=inspect_entropy,
             )
-            verdict = classifier.evaluate(event, ctx)
+
+            t_h0 = time.perf_counter()
+            heur_verdict = heur_clf.evaluate(event, ctx)
+            heur_ms = round((time.perf_counter() - t_h0) * 1000.0, 4)
+
+            ml_verdict = None
+            if ml_clf is not None and (args.engine == "ml" or not args.no_shadow):
+                ml_verdict = ml_clf.evaluate(event, ctx)
+
+            verdict = ml_verdict if (args.engine == "ml" and ml_verdict is not None) else heur_verdict
             if verdict.action == "ALREADY_FROZEN":
                 continue
 
@@ -93,10 +130,16 @@ def run_defender(args: argparse.Namespace) -> int:
                     mtti_ms = res.mtti_ms
                     mitigation_err = res.error
                     if res.success:
-                        classifier.mark_frozen(pid)
+                        heur_clf.mark_frozen(pid)
+                        if ml_clf is not None:
+                            ml_clf.mark_frozen(pid)
                         display_action = "FROZEN"
                     else:
                         display_action = "FREEZE_ERR"
+
+            agree = None
+            if ml_verdict is not None and heur_verdict.action != "ALREADY_FROZEN" and ml_verdict.action != "ALREADY_FROZEN":
+                agree = heur_verdict.action == ml_verdict.action
 
             ts = time.strftime("%H:%M:%S")
             record = {
@@ -109,12 +152,30 @@ def run_defender(args: argparse.Namespace) -> int:
                 "name": event.get("name", ""),
                 "exe": ctx.exe,
                 "ancestry": [c for _, c in ctx.ancestry],
+                "engine": args.engine,
                 "score": verdict.score,
                 "entropy": verdict.entropy,
                 "action": display_action,
                 "mtti_ms": mtti_ms,
                 "error": mitigation_err,
                 "reasons": verdict.reasons,
+                "heuristic": {
+                    "score": heur_verdict.score,
+                    "action": heur_verdict.action,
+                    "infer_ms": heur_ms,
+                },
+                "ml": (
+                    {
+                        "score": ml_verdict.score,
+                        "prob": ml_verdict.prob,
+                        "action": ml_verdict.action,
+                        "infer_ms": ml_verdict.infer_ms,
+                        "model": ml_verdict.model_label,
+                    }
+                    if ml_verdict is not None
+                    else None
+                ),
+                "agree": agree,
             }
             log_file.write(json.dumps(record) + "\n")
             log_file.flush()
@@ -127,7 +188,7 @@ def run_defender(args: argparse.Namespace) -> int:
                 if mitigation_err:
                     reason_str = f"{reason_str} (err={mitigation_err})"
                 print(
-                    f"[{ts}] pid={pid} event={ev_type} label={label} "
+                    f"[{ts}] [{args.engine}] pid={pid} event={ev_type} label={label} "
                     f"score={verdict.score} entropy={ent_str} action={display_action} "
                     f"mtti={mtti_str} reasons={reason_str}",
                     flush=True,
@@ -150,7 +211,10 @@ def run_defender(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Autonomous eBPF fileless malware defender (heuristic)")
+    parser = argparse.ArgumentParser(description="Autonomous eBPF fileless malware defender")
+    parser.add_argument("--engine", choices=["heuristic", "ml"], default="heuristic", help="Active mitigation classifier")
+    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="Path to trained ML model.joblib")
+    parser.add_argument("--no-shadow", action="store_true", help="Disable shadow scoring by the inactive classifier")
     parser.add_argument("--sensor", type=Path, default=DEFAULT_SENSOR, help="Path to compiled eBPF sensor binary")
     parser.add_argument("--bpf-obj", type=Path, default=DEFAULT_BPF_OBJ, help="Path to compiled probes.bpf.o")
     parser.add_argument("--rules", type=Path, default=DEFAULT_RULES, help="Path to rules.yaml")

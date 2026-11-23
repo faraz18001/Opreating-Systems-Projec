@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import DemoLab from "./components/DemoLab.jsx";
 import InspectorPane from "./components/InspectorPane.jsx";
+import MlComparisonPanel from "./components/MlComparisonPanel.jsx";
 import MttiStrip from "./components/MttiStrip.jsx";
 
 const VALID_FILTERS = ["all", "frozen", "alert", "allow"];
@@ -176,7 +177,7 @@ export default function App() {
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dry_run: dryRun }),
+        body: JSON.stringify({ dry_run: dryRun, engine }),
       });
       const data = await res.json();
       setStatus(data);
@@ -192,6 +193,39 @@ export default function App() {
     }
   }
 
+  async function handleEngineSelect(nextEngine) {
+    setEngine(nextEngine);
+    setActionNotice("");
+    if (!status?.running || status.engine === nextEngine) return;
+    if (nextEngine === "ml" && !status?.ml_available) {
+      setActionNotice("ML bundle missing: train defender_ml/model.joblib before switching the active sensor.");
+      return;
+    }
+
+    setSensorBusy(true);
+    try {
+      await fetch("/api/defender/stop", { method: "POST" });
+      const res = await fetch("/api/defender/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dry_run: dryRun, engine: nextEngine }),
+      });
+      const data = await res.json();
+      setStatus(data);
+      if (data.last_error) {
+        setLoadError(data.last_error);
+      } else {
+        setActionNotice(
+          `Switched active mitigation engine to ${nextEngine === "ml" ? "ML classifier" : "Heuristic rules"}.`
+        );
+      }
+    } catch (err) {
+      setLoadError(`Engine switch failed: ${err.message}`);
+    } finally {
+      setSensorBusy(false);
+    }
+  }
+
   async function handleDryRunToggle(nextDryRun) {
     setDryRun(nextDryRun);
     if (!status?.running) return;
@@ -202,7 +236,7 @@ export default function App() {
       const res = await fetch("/api/defender/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dry_run: nextDryRun }),
+        body: JSON.stringify({ dry_run: nextDryRun, engine }),
       });
       const data = await res.json();
       setStatus(data);
@@ -308,7 +342,7 @@ export default function App() {
                 role="tab"
                 className="engine-tab"
                 aria-selected={engine === "heuristic"}
-                onClick={() => setEngine("heuristic")}
+                onClick={() => handleEngineSelect("heuristic")}
               >
                 Heuristic engine
               </button>
@@ -317,7 +351,7 @@ export default function App() {
                 role="tab"
                 className="engine-tab"
                 aria-selected={engine === "ml"}
-                onClick={() => setEngine("ml")}
+                onClick={() => handleEngineSelect("ml")}
               >
                 ML engine
               </button>
@@ -400,21 +434,15 @@ export default function App() {
           </div>
         )}
 
-        {engine === "ml" ? (
-          <section className="ml-placeholder" aria-labelledby="ml-heading">
-            <h2 id="ml-heading">Machine learning classifier</h2>
-            <p>
-              The defender_ml directory is currently empty. Collect benign and malicious eBPF telemetry rows into a CSV dataset, train a scikit-learn Decision Tree or Random Forest model, and connect it to this view for side-by-side comparison against the heuristic engine.
-            </p>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => setEngine("heuristic")}
-            >
-              Back to heuristic
-            </button>
-          </section>
-        ) : (
+        {engine === "ml" && (
+          <MlComparisonPanel
+            status={status}
+            onRefresh={fetchInitial}
+            onBackToHeuristic={() => handleEngineSelect("heuristic")}
+          />
+        )}
+
+        {(engine === "heuristic" || status?.ml_available) && (
           <>
             <section className="tally" aria-label="Live telemetry summary">
               <div className="tally__item">
@@ -550,7 +578,11 @@ export default function App() {
                                 <span className="ledger__proc">{ev.comm || "unknown"}</span>
                                 {ev.name && <span className="ledger__sub">{ev.name}</span>}
                               </td>
-                              <td className="num">{ev.score}</td>
+                              <td className="num">
+                                {engine === "ml" && ev.ml
+                                  ? `${(ev.ml.prob * 100).toFixed(0)}%`
+                                  : ev.score}
+                              </td>
                               <td className="num">
                                 {typeof ev.entropy === "number" ? ev.entropy.toFixed(2) : "n/a"}
                               </td>
