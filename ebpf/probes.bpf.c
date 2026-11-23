@@ -47,16 +47,37 @@ struct {
     __type(value, u32);
 } memfd_tgids SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct pidns_cfg);
+} ns_config SEC(".maps");
+
+static __always_inline int get_ns_tgid(u32 *out_tgid) {
+    u32 zero = 0;
+    struct pidns_cfg *cfg = bpf_map_lookup_elem(&ns_config, &zero);
+    if (cfg && cfg->ino != 0) {
+        struct bpf_pidns_info ns = {};
+        if (bpf_get_ns_current_pid_tgid(cfg->dev, cfg->ino, &ns, sizeof(ns)) != 0) {
+            return -1;
+        }
+        *out_tgid = ns.tgid;
+        return 0;
+    }
+    *out_tgid = (u32)(bpf_get_current_pid_tgid() >> 32);
+    return 0;
+}
+
 static __always_inline u32 get_ppid(void) {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     return BPF_CORE_READ(task, real_parent, tgid);
 }
 
-static __always_inline void fill_common(struct sensor_event *ev, u32 type) {
-    u64 id = bpf_get_current_pid_tgid();
+static __always_inline void fill_common(struct sensor_event *ev, u32 type, u32 ns_tgid) {
     ev->ktime_ns = bpf_ktime_get_ns();
     ev->event_type = type;
-    ev->pid = id >> 32;
+    ev->pid = ns_tgid;
     ev->ppid = get_ppid();
     ev->uid = (u32)bpf_get_current_uid_gid();
     bpf_get_current_comm(&ev->comm, sizeof(ev->comm));
@@ -64,6 +85,11 @@ static __always_inline void fill_common(struct sensor_event *ev, u32 type) {
 
 SEC("tracepoint/syscalls/sys_enter_memfd_create")
 int tp_enter_memfd_create(struct trace_event_raw_sys_enter *ctx) {
+    u32 ns_tgid = 0;
+    if (get_ns_tgid(&ns_tgid) != 0) {
+        return 0;
+    }
+
     u64 id = bpf_get_current_pid_tgid();
     struct memfd_pending pend = {};
     const char *uname = (const char *)ctx->args[0];
@@ -82,11 +108,16 @@ int tp_exit_memfd_create(struct trace_event_raw_sys_exit *ctx) {
         return 0;
     }
 
+    u32 ns_tgid = 0;
+    if (get_ns_tgid(&ns_tgid) != 0) {
+        bpf_map_delete_elem(&pending_memfd, &id);
+        return 0;
+    }
+
     long ret = ctx->ret;
     if (ret >= 0) {
-        u32 tgid = id >> 32;
         struct fd_key key = {
-            .tgid = tgid,
+            .tgid = ns_tgid,
             .fd = (s32)ret,
         };
         struct memfd_meta meta = {};
@@ -96,16 +127,16 @@ int tp_exit_memfd_create(struct trace_event_raw_sys_exit *ctx) {
         bpf_map_update_elem(&memfd_fds, &key, &meta, BPF_ANY);
 
         u32 one = 1;
-        u32 *cnt = bpf_map_lookup_elem(&memfd_tgids, &tgid);
+        u32 *cnt = bpf_map_lookup_elem(&memfd_tgids, &ns_tgid);
         if (cnt) {
             __sync_fetch_and_add(cnt, 1);
         } else {
-            bpf_map_update_elem(&memfd_tgids, &tgid, &one, BPF_ANY);
+            bpf_map_update_elem(&memfd_tgids, &ns_tgid, &one, BPF_ANY);
         }
 
         struct sensor_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
         if (ev) {
-            fill_common(ev, EVENT_MEMFD_CREATE);
+            fill_common(ev, EVENT_MEMFD_CREATE, ns_tgid);
             ev->fd = (int)ret;
             ev->flags = pend->flags;
             ev->is_tracked_memfd = 1;
@@ -120,8 +151,11 @@ int tp_exit_memfd_create(struct trace_event_raw_sys_exit *ctx) {
 
 SEC("tracepoint/syscalls/sys_enter_execveat")
 int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
-    u64 id = bpf_get_current_pid_tgid();
-    u32 tgid = id >> 32;
+    u32 tgid = 0;
+    if (get_ns_tgid(&tgid) != 0) {
+        return 0;
+    }
+
     int dfd = (int)ctx->args[0];
     const char *filename = (const char *)ctx->args[1];
     unsigned int flags = (unsigned int)ctx->args[4];
@@ -142,7 +176,7 @@ int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
         return 0;
     }
 
-    fill_common(ev, EVENT_EXECVEAT);
+    fill_common(ev, EVENT_EXECVEAT, tgid);
     ev->fd = dfd;
     ev->flags = flags;
     ev->is_tracked_memfd = meta ? 1 : 0;
@@ -159,8 +193,11 @@ int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
 
 SEC("tracepoint/syscalls/sys_enter_execve")
 int tp_enter_execve(struct trace_event_raw_sys_enter *ctx) {
-    u64 id = bpf_get_current_pid_tgid();
-    u32 tgid = id >> 32;
+    u32 tgid = 0;
+    if (get_ns_tgid(&tgid) != 0) {
+        return 0;
+    }
+
     const char *filename = (const char *)ctx->args[0];
     char path[MAX_NAME_LEN] = {};
 
@@ -183,7 +220,7 @@ int tp_enter_execve(struct trace_event_raw_sys_enter *ctx) {
         return 0;
     }
 
-    fill_common(ev, EVENT_EXECVE_FD);
+    fill_common(ev, EVENT_EXECVE_FD, tgid);
     ev->fd = -1;
     ev->flags = 0;
     ev->is_tracked_memfd = tracked ? 1 : 0;
@@ -199,8 +236,11 @@ int tp_enter_prctl(struct trace_event_raw_sys_enter *ctx) {
         return 0;
     }
 
-    u64 id = bpf_get_current_pid_tgid();
-    u32 tgid = id >> 32;
+    u32 tgid = 0;
+    if (get_ns_tgid(&tgid) != 0) {
+        return 0;
+    }
+
     const char *new_name = (const char *)ctx->args[1];
     char name_buf[MAX_NAME_LEN] = {};
 
@@ -220,7 +260,7 @@ int tp_enter_prctl(struct trace_event_raw_sys_enter *ctx) {
         return 0;
     }
 
-    fill_common(ev, EVENT_PRCTL_NAME);
+    fill_common(ev, EVENT_PRCTL_NAME, tgid);
     ev->fd = -1;
     ev->flags = (unsigned int)option;
     ev->is_tracked_memfd = tracked ? 1 : 0;

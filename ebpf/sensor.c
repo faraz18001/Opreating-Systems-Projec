@@ -1,9 +1,11 @@
+#include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "events.h"
@@ -90,6 +92,23 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "error: failed to load BPF object (run with sudo/CAP_BPF)\n");
         bpf_object__close(obj);
         return 1;
+    }
+
+    struct stat ns_st;
+    if (stat("/proc/self/ns/pid", &ns_st) == 0) {
+        int ns_map_fd = bpf_object__find_map_fd_by_name(obj, "ns_config");
+        if (ns_map_fd >= 0) {
+            unsigned int key = 0;
+            struct pidns_cfg cfg = {
+                .dev = (unsigned long long)ns_st.st_dev,
+                .ino = (unsigned long long)ns_st.st_ino,
+            };
+            if (bpf_map_update_elem(ns_map_fd, &key, &cfg, BPF_ANY) != 0) {
+                fprintf(stderr, "warning: failed to configure pidns filter: %s\n", strerror(errno));
+            }
+        }
+    } else {
+        fprintf(stderr, "warning: failed to stat /proc/self/ns/pid: %s\n", strerror(errno));
     }
 
     struct bpf_link *links[16];

@@ -22,4 +22,9 @@ struct sensor_event {
     char name[MAX_NAME_LEN];
 };
 
+struct pidns_cfg {
+    unsigned long long dev;
+    unsigned long long ino;
+};
+
 #endif
