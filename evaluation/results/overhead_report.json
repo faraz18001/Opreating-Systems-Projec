@@ -1,0 +1,46 @@
+{
+  "iterations": 3000,
+  "results": [
+    {
+      "config": "baseline_none",
+      "memfd_us_per_op": 1.238,
+      "fs_us_per_op": 10.844,
+      "rss_mb": 0.0,
+      "memfd_overhead_pct": 0.0,
+      "fs_overhead_pct": 0.0
+    },
+    {
+      "config": "traditional_fim_inotify",
+      "memfd_us_per_op": 1.358,
+      "fs_us_per_op": 22.046,
+      "rss_mb": 19.22,
+      "fim_batches_seen": 1194,
+      "memfd_overhead_pct": 9.7,
+      "fs_overhead_pct": 103.3
+    },
+    {
+      "config": "ebpf_userspace_heur",
+      "memfd_us_per_op": 2.632,
+      "fs_us_per_op": 10.492,
+      "rss_mb": 23.54,
+      "memfd_overhead_pct": 112.6,
+      "fs_overhead_pct": -3.2
+    },
+    {
+      "config": "ebpf_userspace_ml",
+      "memfd_us_per_op": 6.135,
+      "fs_us_per_op": 33.609,
+      "rss_mb": 129.64,
+      "memfd_overhead_pct": 395.6,
+      "fs_overhead_pct": 209.9
+    },
+    {
+      "config": "ebpf_inkernel_vfs",
+      "memfd_us_per_op": 5.882,
+      "fs_us_per_op": 33.363,
+      "rss_mb": 23.55,
+      "memfd_overhead_pct": 375.1,
+      "fs_overhead_pct": 207.7
+    }
+  ]
+}
