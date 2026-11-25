@@ -3,16 +3,17 @@ import argparse
 import json
 import os
 import signal
+import socket
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFENDER = PROJECT_ROOT / "defender_heuristic" / "main.py"
 LOADER = PROJECT_ROOT / "red_team" / "build" / "loader"
-BENCH_LOG = PROJECT_ROOT / "logs" / "benchmark_events.jsonl"
 
 
 def read_rss_mb(pid: int) -> float:
@@ -20,11 +21,19 @@ def read_rss_mb(pid: int) -> float:
         with open(f"/proc/{pid}/status", "r", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
-                    kb = int(line.split()[1])
-                    return kb / 1024.0
+                    return int(line.split()[1]) / 1024.0
     except OSError:
         pass
     return 0.0
+
+
+def read_cpu_ticks(pid: int) -> int:
+    try:
+        with open(f"/proc/{pid}/stat", "r", encoding="utf-8") as f:
+            parts = f.read().rsplit(")", 1)[1].split()
+            return int(parts[11]) + int(parts[12])
+    except (OSError, IndexError, ValueError):
+        return 0
 
 
 def is_stopped(pid: int) -> bool:
@@ -38,40 +47,74 @@ def is_stopped(pid: int) -> bool:
     return False
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Benchmark eBPF defender MTTI, FPR, and RAM overhead")
-    parser.add_argument("--runs", type=int, default=5, help="Number of malicious and benign runs")
-    args = parser.parse_args()
+class MockC2:
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        self.sock.listen(16)
+        self.sock.settimeout(0.15)
+        self.leaks = []
+        self._stop = False
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
-    if os.geteuid() != 0:
-        sys.stderr.write("error: run benchmark with sudo so eBPF probes can attach.\n")
-        return 1
+    def _loop(self):
+        while not self._stop:
+            try:
+                conn, _ = self.sock.accept()
+                data = conn.recv(512).decode("utf-8", errors="replace").strip()
+                if data:
+                    self.leaks.append(data)
+                conn.close()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
 
-    if BENCH_LOG.exists():
-        BENCH_LOG.unlink()
+    def reset(self):
+        self.leaks.clear()
+
+    def close(self):
+        self._stop = True
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def run_mode(mode_name: str, kernel_freeze: bool, runs: int, c2: MockC2) -> dict:
+    log_path = PROJECT_ROOT / "logs" / f"bench_{mode_name}.jsonl"
+    log_path.unlink(missing_ok=True)
+
+    cmd = [sys.executable, str(DEFENDER), "--log", str(log_path)]
+    if kernel_freeze:
+        cmd.append("--kernel-freeze")
 
     defender_proc = subprocess.Popen(
-        [sys.executable, str(DEFENDER), "--log", str(BENCH_LOG)],
-        stdout=subprocess.PIPE,
+        cmd,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
     )
-
-    time.sleep(1.5)
+    time.sleep(1.3)
     if defender_proc.poll() is not None:
-        sys.stderr.write(f"error: defender exited early:\n{defender_proc.stderr.read()}\n")
-        return 1
+        raise RuntimeError(defender_proc.stderr.read())
 
+    c2.reset()
+    t0 = time.monotonic()
+    cpu0 = read_cpu_ticks(defender_proc.pid)
     frozen_count = 0
     false_positives = 0
 
-    for _ in range(args.runs):
+    for _ in range(runs):
         p = subprocess.Popen(
-            [str(LOADER), "--ticks", "6"],
+            [str(LOADER), "--ticks", "6", "--exfil-port", str(c2.port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        deadline = time.monotonic() + 1.5
+        deadline = time.monotonic() + 1.2
         was_frozen = False
         while time.monotonic() < deadline:
             if is_stopped(p.pid):
@@ -88,9 +131,9 @@ def main() -> int:
         except ProcessLookupError:
             pass
         p.wait(timeout=2)
-        time.sleep(0.1)
+        time.sleep(0.08)
 
-    for _ in range(args.runs):
+    for _ in range(runs):
         p = subprocess.Popen(
             [str(LOADER), "--benign-memfd"],
             stdout=subprocess.DEVNULL,
@@ -104,7 +147,13 @@ def main() -> int:
             os.kill(p.pid, signal.SIGKILL)
             p.wait(timeout=2)
 
+    elapsed = max(time.monotonic() - t0, 0.001)
+    cpu1 = read_cpu_ticks(defender_proc.pid)
+    hz = os.sysconf("SC_CLK_TCK")
+    cpu_pct = ((cpu1 - cpu0) / hz) / elapsed * 100.0
     rss_mb = read_rss_mb(defender_proc.pid)
+    leaks = len(c2.leaks)
+
     defender_proc.terminate()
     try:
         defender_proc.wait(timeout=3)
@@ -112,28 +161,51 @@ def main() -> int:
         defender_proc.kill()
 
     mttis = []
-    if BENCH_LOG.exists():
-        with open(BENCH_LOG, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("action") == "FROZEN" and rec.get("mtti_ms") is not None:
-                    mttis.append(float(rec["mtti_ms"]))
+    if log_path.exists():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("action") == "FROZEN" and rec.get("mtti_ms") is not None:
+                mttis.append(float(rec["mtti_ms"]))
 
-    det_rate = (frozen_count / args.runs) * 100.0 if args.runs else 0.0
-    fpr = (false_positives / args.runs) * 100.0 if args.runs else 0.0
-    avg_mtti = f"{statistics.mean(mttis):.3f} ms" if mttis else "n/a"
-    min_mtti = f"{min(mttis):.3f} ms" if mttis else "n/a"
-    max_mtti = f"{max(mttis):.3f} ms" if mttis else "n/a"
+    return {
+        "mode": mode_name,
+        "frozen": frozen_count,
+        "runs": runs,
+        "fpr": false_positives,
+        "leaks": leaks,
+        "avg_mtti": statistics.mean(mttis) if mttis else None,
+        "rss_mb": rss_mb,
+        "cpu_pct": cpu_pct,
+    }
 
-    print("Evaluation Summary:")
-    print(f"  Detection & Freeze Rate  : {frozen_count}/{args.runs} ({det_rate:.1f}%)")
-    print(f"  False Positive Rate      : {false_positives}/{args.runs} ({fpr:.1f}%)")
-    print(f"  Mean Time to Intercept   : {avg_mtti}")
-    print(f"  Min / Max MTTI           : {min_mtti} / {max_mtti}")
-    print(f"  Defender Python RSS RAM  : {rss_mb:.2f} MB")
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Compare Userspace vs In-Kernel eBPF mitigation")
+    parser.add_argument("--runs", type=int, default=5, help="Runs per mode")
+    args = parser.parse_args()
+
+    if os.geteuid() != 0:
+        sys.stderr.write("error: run benchmark with sudo so eBPF probes can attach.\n")
+        return 1
+
+    c2 = MockC2()
+    try:
+        u = run_mode("userspace", False, args.runs, c2)
+        k = run_mode("in_kernel", True, args.runs, c2)
+    finally:
+        c2.close()
+
+    print(f"Benchmark Comparison ({args.runs} malicious + {args.runs} benign runs per mode):")
+    for r in (u, k):
+        mtti_s = f"{r['avg_mtti']:.4f} ms" if r["avg_mtti"] is not None else "n/a"
+        print(
+            f"  {r['mode']:<10} | frozen={r['frozen']}/{r['runs']} "
+            f"| c2_leaks={r['leaks']}/{r['runs']} | fpr={r['fpr']}/{r['runs']} "
+            f"| mean_mtti={mtti_s} | rss={r['rss_mb']:.1f} MB | cpu={r['cpu_pct']:.2f}%"
+        )
     return 0
 
 
