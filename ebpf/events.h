@@ -9,8 +9,14 @@
 #define TASK_COMM_LEN 16
 #define MAX_NAME_LEN  64
 
+struct pidns_cfg {
+    unsigned long long dev;
+    unsigned long long ino;
+};
+
 struct sensor_event {
     unsigned long long ktime_ns;
+    unsigned long long freeze_ktime_ns;
     unsigned int event_type;
     unsigned int pid;
     unsigned int ppid;
@@ -18,13 +24,9 @@ struct sensor_event {
     int fd;
     unsigned int flags;
     unsigned int is_tracked_memfd;
+    unsigned int kernel_frozen;
     char comm[TASK_COMM_LEN];
     char name[MAX_NAME_LEN];
-};
-
-struct pidns_cfg {
-    unsigned long long dev;
-    unsigned long long ino;
 };
 
 #endif

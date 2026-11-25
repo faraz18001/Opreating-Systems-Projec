@@ -50,16 +50,18 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
 
     const struct sensor_event *ev = (const struct sensor_event *)data;
-    printf("{\"ktime_ns\":%llu,\"type\":\"%s\",\"pid\":%u,\"ppid\":%u,"
-           "\"uid\":%u,\"fd\":%d,\"flags\":%u,\"tracked_memfd\":%s,\"comm\":",
+    printf("{\"ktime_ns\":%llu,\"freeze_ktime_ns\":%llu,\"type\":\"%s\",\"pid\":%u,\"ppid\":%u,"
+           "\"uid\":%u,\"fd\":%d,\"flags\":%u,\"tracked_memfd\":%s,\"kernel_frozen\":%s,\"comm\":",
            ev->ktime_ns,
+           ev->freeze_ktime_ns,
            event_type_str(ev->event_type),
            ev->pid,
            ev->ppid,
            ev->uid,
            ev->fd,
            ev->flags,
-           ev->is_tracked_memfd ? "true" : "false");
+           ev->is_tracked_memfd ? "true" : "false",
+           ev->kernel_frozen ? "true" : "false");
     print_json_escaped(ev->comm, TASK_COMM_LEN);
     printf(",\"name\":");
     print_json_escaped(ev->name, MAX_NAME_LEN);
@@ -76,7 +78,16 @@ static int libbpf_print_cb(enum libbpf_print_level level, const char *fmt, va_li
 }
 
 int main(int argc, char *argv[]) {
-    const char *obj_path = (argc > 1) ? argv[1] : "ebpf/build/probes.bpf.o";
+    const char *obj_path = "ebpf/build/probes.bpf.o";
+    unsigned int kernel_freeze = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--kernel-freeze") == 0) {
+            kernel_freeze = 1;
+        } else {
+            obj_path = argv[i];
+        }
+    }
 
     libbpf_set_print(libbpf_print_cb);
     signal(SIGINT, handle_signal);
@@ -94,6 +105,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    int cfg_fd = bpf_object__find_map_fd_by_name(obj, "defender_cfg");
+    if (cfg_fd >= 0) {
+        unsigned int key = 0;
+        if (bpf_map_update_elem(cfg_fd, &key, &kernel_freeze, BPF_ANY) != 0) {
+            fprintf(stderr, "warning: failed to configure kernel_freeze mode\n");
+        }
+    }
+
     struct stat ns_st;
     if (stat("/proc/self/ns/pid", &ns_st) == 0) {
         int ns_map_fd = bpf_object__find_map_fd_by_name(obj, "ns_config");
@@ -107,8 +126,6 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "warning: failed to configure pidns filter: %s\n", strerror(errno));
             }
         }
-    } else {
-        fprintf(stderr, "warning: failed to stat /proc/self/ns/pid: %s\n", strerror(errno));
     }
 
     struct bpf_link *links[16];
@@ -151,7 +168,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    fprintf(stderr, "[sensor] attached %d eBPF tracepoints, streaming events\n", link_count);
+    fprintf(stderr, "[sensor] attached %d eBPF tracepoints (kernel_freeze=%u)\n",
+            link_count, kernel_freeze);
     fflush(stderr);
 
     while (running) {

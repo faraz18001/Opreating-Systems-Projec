@@ -5,6 +5,7 @@
 
 #define AT_EMPTY_PATH 0x1000
 #define PR_SET_NAME   15
+#define SIGSTOP_NUM   19
 
 struct memfd_pending {
     unsigned int flags;
@@ -20,6 +21,20 @@ struct memfd_meta {
     unsigned int flags;
     char name[MAX_NAME_LEN];
 };
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u32);
+} defender_cfg SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct pidns_cfg);
+} ns_config SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -47,13 +62,6 @@ struct {
     __type(value, u32);
 } memfd_tgids SEC(".maps");
 
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
-    __type(key, u32);
-    __type(value, struct pidns_cfg);
-} ns_config SEC(".maps");
-
 static __always_inline int get_ns_tgid(u32 *out_tgid) {
     u32 zero = 0;
     struct pidns_cfg *cfg = bpf_map_lookup_elem(&ns_config, &zero);
@@ -69,6 +77,12 @@ static __always_inline int get_ns_tgid(u32 *out_tgid) {
     return 0;
 }
 
+static __always_inline int is_kernel_freeze_enabled(void) {
+    u32 idx = 0;
+    u32 *mode = bpf_map_lookup_elem(&defender_cfg, &idx);
+    return (mode && *mode == 1) ? 1 : 0;
+}
+
 static __always_inline u32 get_ppid(void) {
     struct task_struct *task = (struct task_struct *)bpf_get_current_task();
     return BPF_CORE_READ(task, real_parent, tgid);
@@ -76,11 +90,25 @@ static __always_inline u32 get_ppid(void) {
 
 static __always_inline void fill_common(struct sensor_event *ev, u32 type, u32 ns_tgid) {
     ev->ktime_ns = bpf_ktime_get_ns();
+    ev->freeze_ktime_ns = 0;
     ev->event_type = type;
     ev->pid = ns_tgid;
     ev->ppid = get_ppid();
     ev->uid = (u32)bpf_get_current_uid_gid();
+    ev->kernel_frozen = 0;
     bpf_get_current_comm(&ev->comm, sizeof(ev->comm));
+}
+
+SEC("tracepoint/sched/sched_process_fork")
+int tp_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx) {
+    u32 parent_pid = (u32)ctx->parent_pid;
+    u32 child_pid = (u32)ctx->child_pid;
+    u32 *tracked = bpf_map_lookup_elem(&memfd_tgids, &parent_pid);
+    if (tracked) {
+        u32 one = 1;
+        bpf_map_update_elem(&memfd_tgids, &child_pid, &one, BPF_ANY);
+    }
+    return 0;
 }
 
 SEC("tracepoint/syscalls/sys_enter_memfd_create")
@@ -166,8 +194,18 @@ int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
     };
     struct memfd_meta *meta = bpf_map_lookup_elem(&memfd_fds, &key);
     int is_empty_path = (flags & AT_EMPTY_PATH) != 0;
+    u32 tracked_flag = 0;
 
-    if (!meta && !is_empty_path) {
+    if (meta) {
+        tracked_flag = 1;
+    } else {
+        u32 *tracked_tgid = bpf_map_lookup_elem(&memfd_tgids, &tgid);
+        if (tracked_tgid) {
+            tracked_flag = 1;
+        }
+    }
+
+    if (!tracked_flag && !is_empty_path) {
         return 0;
     }
 
@@ -179,7 +217,14 @@ int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
     fill_common(ev, EVENT_EXECVEAT, tgid);
     ev->fd = dfd;
     ev->flags = flags;
-    ev->is_tracked_memfd = meta ? 1 : 0;
+    ev->is_tracked_memfd = tracked_flag;
+
+    if (tracked_flag && is_kernel_freeze_enabled()) {
+        if (bpf_send_signal(SIGSTOP_NUM) == 0) {
+            ev->kernel_frozen = 1;
+            ev->freeze_ktime_ns = bpf_ktime_get_ns();
+        }
+    }
 
     if (meta) {
         __builtin_memcpy(ev->name, meta->name, sizeof(ev->name));
@@ -224,6 +269,14 @@ int tp_enter_execve(struct trace_event_raw_sys_enter *ctx) {
     ev->fd = -1;
     ev->flags = 0;
     ev->is_tracked_memfd = tracked ? 1 : 0;
+
+    if (is_proc_path && tracked && is_kernel_freeze_enabled()) {
+        if (bpf_send_signal(SIGSTOP_NUM) == 0) {
+            ev->kernel_frozen = 1;
+            ev->freeze_ktime_ns = bpf_ktime_get_ns();
+        }
+    }
+
     __builtin_memcpy(ev->name, path, sizeof(ev->name));
     bpf_ringbuf_submit(ev, 0);
     return 0;
