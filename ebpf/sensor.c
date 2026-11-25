@@ -175,7 +175,7 @@ int main(int argc, char *argv[]) {
     while (running) {
         int err = ring_buffer__poll(rb, 100);
         if (err == -EINTR) {
-            break;
+            continue;
         }
         if (err < 0) {
             fprintf(stderr, "error: ring_buffer__poll failed: %d\n", err);
