@@ -368,25 +368,37 @@ c2_server = MockC2Server()
 controller = DefenderController(LOG_FILE, c2_server)
 
 
-def run_demo_command(action: str) -> dict:
+VECTOR_FLAGS = {
+    "standard": [],
+    "dup-fd": ["--dup-fd"],
+    "fork": ["--fork"],
+    "execve-fd": ["--execve-fd"],
+    "high-entropy": ["--high-entropy"],
+}
+
+
+def run_demo_command(action: str, body: Optional[dict] = None) -> dict:
     if action == "attack":
         if not LOADER_BIN.exists():
             return {"ok": False, "error": "loader binary missing; run make first"}
+        vector = str((body or {}).get("vector", "standard"))
+        extra_flags = VECTOR_FLAGS.get(vector, [])
         before_leaks = len(c2_server.snapshot())
         proc = subprocess.Popen(
-            [str(LOADER_BIN), "--ticks", "20", "--exfil-port", str(c2_server.port)],
+            [str(LOADER_BIN), *extra_flags, "--ticks", "20", "--exfil-port", str(c2_server.port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         threading.Thread(target=proc.wait, daemon=True).start()
-        time.sleep(0.28)
+        time.sleep(0.32)
         state = read_proc_state(proc.pid)
         after_leaks = len(c2_server.snapshot())
         return {
             "ok": True,
+            "vector": vector,
             "pid": proc.pid,
             "proc_state": state,
-            "frozen": state.startswith("T"),
+            "frozen": state.startswith("T") or (vector == "fork" and len(controller.get_quarantine()) > 0),
             "leaked": after_leaks > before_leaks,
         }
 
@@ -554,7 +566,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/demo/"):
             action = path.split("/api/demo/", 1)[1]
-            self._send_json(run_demo_command(action))
+            self._send_json(run_demo_command(action, body))
             return
 
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)

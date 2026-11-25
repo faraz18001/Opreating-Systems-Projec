@@ -30,6 +30,7 @@ export default function App() {
   const [c2Leaks, setC2Leaks] = useState([]);
   const [expandedId, setExpandedId] = useState(null);
   const [showModels, setShowModels] = useState(false);
+  const [vector, setVector] = useState("standard");
   const [sensorBusy, setSensorBusy] = useState(false);
   const [attackBusy, setAttackBusy] = useState(false);
   const [verifyBusy, setVerifyBusy] = useState(null);
@@ -166,17 +167,21 @@ export default function App() {
     setAttackBusy(true);
     setNotice("");
     try {
-      const res = await fetch("/api/demo/attack", { method: "POST" });
+      const res = await fetch("/api/demo/attack", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vector }),
+      });
       const data = await res.json();
       await refreshSnapshot();
       if (!data.ok) {
         setError(data.error || "Attack launch failed.");
       } else if (data.frozen && !data.leaked) {
-        setNotice(`PID ${data.pid} frozen in RAM. Zero bytes reached mock C2.`);
+        setNotice(`Vector ${data.vector} frozen in RAM (PID ${data.pid}). Zero bytes reached mock C2.`);
       } else if (data.frozen && data.leaked) {
-        setNotice(`PID ${data.pid} frozen, but payload won the userspace race and leaked to C2.`);
+        setNotice(`Vector ${data.vector} frozen (PID ${data.pid}), but payload won the userspace race and leaked to C2.`);
       } else {
-        setNotice(`Sensor is off: PID ${data.pid} exfiltrated secret to mock C2.`);
+        setNotice(`Sensor is off: vector ${data.vector} (PID ${data.pid}) exfiltrated secret to mock C2.`);
       }
     } finally {
       setAttackBusy(false);
@@ -319,6 +324,20 @@ export default function App() {
                 {status?.running ? "Sensor active" : "Sensor off"}
               </span>
             </label>
+
+            <select
+              className="vector-select"
+              aria-label="Attack evasion vector"
+              value={vector}
+              disabled={attackBusy}
+              onChange={(e) => setVector(e.target.value)}
+            >
+              <option value="standard">Standard</option>
+              <option value="dup-fd">dup2 remap</option>
+              <option value="fork">fork handoff</option>
+              <option value="execve-fd">/proc/fd fallback</option>
+              <option value="high-entropy">High-entropy</option>
+            </select>
 
             <button
               type="button"
@@ -471,6 +490,31 @@ export default function App() {
 
                                     <dt>Boundary</dt>
                                     <dd>{ev.freeze_mode || "passive"}</dd>
+
+                                    {ev.vfs_memfd && (
+                                      <>
+                                        <dt>Kernel VFS</dt>
+                                        <dd className="num">
+                                          {`${ev.vfs_name || "memfd"} (tmpfs inode ${ev.vfs_ino})`}
+                                        </dd>
+                                      </>
+                                    )}
+
+                                    {ev.forensics && (
+                                      <>
+                                        <dt>RAM dump</dt>
+                                        <dd className="num">
+                                          {`${(ev.forensics.size_bytes / 1024).toFixed(1)} KB ${
+                                            ev.forensics.elf?.valid_elf
+                                              ? `ELF${ev.forensics.elf.bits || 64} ${ev.forensics.elf.arch || ""}`.trim()
+                                              : "image"
+                                          }, sha256 ${ev.forensics.sha256.slice(0, 16)}…`}
+                                          {ev.forensics.iocs?.length > 0
+                                            ? ` (IOCs: ${ev.forensics.iocs.join(", ")})`
+                                            : ""}
+                                        </dd>
+                                      </>
+                                    )}
 
                                     <dt>Heuristic</dt>
                                     <dd className="num">
