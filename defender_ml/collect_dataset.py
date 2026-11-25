@@ -350,47 +350,69 @@ def bootstrap_dataset(args: argparse.Namespace) -> int:
 
     for i in range(n_benign):
         grp = f"syn_b_{i // 2}"
-        archetype = i % 5
-        if archetype == 0:
+        archetype = i % 10
+        if archetype in (0, 1):
             # Desktop / audio / systemd memfd_create allocation
             feats = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, -1.0]
-        elif archetype == 1:
+        elif archetype in (2, 3):
             # Non-allowlisted utility creating a benign memfd buffer without exec
             feats = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]
-        elif archetype == 2:
-            # Allowlisted runtime (e.g. runc, systemd-executor, chromium) re-exec via /proc/self/fd
-            ent = round(rng.uniform(4.6, 7.3), 4)
-            has_memfd = 1.0 if rng.random() < 0.35 else 0.0
+        elif archetype in (4, 5):
+            # Allowlisted runtime (runc, systemd-executor, chromium) re-exec via /proc/self/fd
+            ent = round(rng.uniform(4.4, 6.7), 4)
+            has_memfd = 1.0 if rng.random() < 0.4 else 0.0
             feats = [0.0, 0.0, 1.0, 0.0, has_memfd, 0.0, has_memfd, 1.0, 0.0, 1.0, ent]
-        elif archetype == 3:
-            # Allowlisted program invoking execveat with AT_EMPTY_PATH
-            ent = round(rng.uniform(4.4, 7.1), 4)
+        elif archetype == 6:
+            # Allowlisted program invoking execveat with AT_EMPTY_PATH on normal binary
+            ent = round(rng.uniform(4.2, 6.8), 4)
             feats = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, ent]
+        elif archetype == 7:
+            # Hard benign case: non-allowlisted sandbox/dev wrapper re-execing via /proc/self/fd
+            ent = round(rng.uniform(4.2, 6.3), 4)
+            has_memfd = 1.0 if rng.random() < 0.35 else 0.0
+            feats = [0.0, 0.0, 1.0, 0.0, has_memfd, 0.0, has_memfd, 1.0, 0.0, 0.0, ent]
+        elif archetype == 8:
+            # Hard benign case: allowlisted JIT/browser process executing sealed memfd helper (unpacked)
+            ent = round(rng.uniform(4.6, 6.95), 4)
+            feats = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, ent]
         else:
             # Normal worker thread renaming itself without kthread bracket prefix
-            feats = [0.0, 0.0, 0.0, 1.0, 1.0 if rng.random() < 0.4 else 0.0, 0.0, 0.0, 0.0, 0.0, 1.0 if rng.random() < 0.5 else 0.0, -1.0]
+            feats = [
+                0.0, 0.0, 0.0, 1.0,
+                1.0 if rng.random() < 0.45 else 0.0,
+                0.0, 0.0, 0.0, 0.0,
+                1.0 if rng.random() < 0.5 else 0.0,
+                -1.0,
+            ]
         rows.append([*feats, 0, "synthetic_bootstrap", grp])
 
     for i in range(n_malicious):
         grp = f"syn_m_{i // 2}"
-        archetype = i % 4
-        if archetype == 0:
+        archetype = i % 10
+        if archetype in (0, 1, 2):
             # Standard memfd_create + execveat fileless loader (varied binary entropy)
             ent = round(rng.uniform(2.1, 7.9), 4)
             feats = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, ent]
-        elif archetype == 1:
+        elif archetype in (3, 4):
             # Forked-child fileless execveat where child inherited memfd (tracked_memfd=0)
             ent = round(rng.uniform(2.3, 7.9), 4)
             feats = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, ent]
-        elif archetype == 2:
-            # Non-allowlisted process executing via /proc/self/fd/<n>
-            ent = round(rng.uniform(2.2, 7.8), 4)
-            has_memfd = 1.0 if rng.random() < 0.65 else 0.0
+        elif archetype == 5:
+            # Non-allowlisted process executing packed payload via /proc/self/fd/<n>
+            ent = round(rng.uniform(5.8, 7.95), 4)
+            has_memfd = 1.0 if rng.random() < 0.7 else 0.0
             feats = [0.0, 0.0, 1.0, 0.0, has_memfd, 0.0, has_memfd, 1.0, 0.0, 0.0, ent]
+        elif archetype in (6, 7):
+            # Hard evasive case: compromised allowlisted parent (e.g. browser) running high-entropy memfd payload
+            ent = round(rng.uniform(6.65, 7.95), 4)
+            feats = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, ent]
+        elif archetype == 8:
+            # Hard race case: short-lived dropper exited before /proc/<pid>/exe entropy could be read
+            feats = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0 if rng.random() < 0.25 else 0.0, -1.0]
         else:
             # Kernel thread masquerade via prctl(PR_SET_NAME, "[kworker...]")
             tracked = 1.0 if rng.random() < 0.8 else 0.0
-            spoof_allow = 1.0 if rng.random() < 0.15 else 0.0
+            spoof_allow = 1.0 if rng.random() < 0.2 else 0.0
             feats = [0.0, 0.0, 0.0, 1.0, tracked, 0.0, tracked, 0.0, 1.0, spoof_allow, -1.0]
         rows.append([*feats, 1, "synthetic_bootstrap", grp])
 
