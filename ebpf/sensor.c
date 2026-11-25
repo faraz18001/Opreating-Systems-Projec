@@ -50,10 +50,11 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
 
     const struct sensor_event *ev = (const struct sensor_event *)data;
-    printf("{\"ktime_ns\":%llu,\"freeze_ktime_ns\":%llu,\"type\":\"%s\",\"pid\":%u,\"ppid\":%u,"
-           "\"uid\":%u,\"fd\":%d,\"flags\":%u,\"tracked_memfd\":%s,\"kernel_frozen\":%s,\"comm\":",
+    printf("{\"ktime_ns\":%llu,\"freeze_ktime_ns\":%llu,\"vfs_ino\":%llu,\"type\":\"%s\",\"pid\":%u,\"ppid\":%u,"
+           "\"uid\":%u,\"fd\":%d,\"flags\":%u,\"tracked_memfd\":%s,\"vfs_memfd\":%s,\"kernel_frozen\":%s,\"comm\":",
            ev->ktime_ns,
            ev->freeze_ktime_ns,
+           ev->vfs_ino,
            event_type_str(ev->event_type),
            ev->pid,
            ev->ppid,
@@ -61,10 +62,13 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
            ev->fd,
            ev->flags,
            ev->is_tracked_memfd ? "true" : "false",
+           ev->vfs_memfd ? "true" : "false",
            ev->kernel_frozen ? "true" : "false");
     print_json_escaped(ev->comm, TASK_COMM_LEN);
     printf(",\"name\":");
     print_json_escaped(ev->name, MAX_NAME_LEN);
+    printf(",\"vfs_name\":");
+    print_json_escaped(ev->vfs_name, MAX_NAME_LEN);
     printf("}\n");
     fflush(stdout);
     return 0;

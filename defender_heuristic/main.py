@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from classifier import HeuristicClassifier
+from forensics import capture_ram_forensics
 from mitigator import freeze_process
 from telemetry import collect_context
 
@@ -158,6 +159,10 @@ def run_defender(args: argparse.Namespace) -> int:
             if ml_verdict is not None and heur_verdict.action != "ALREADY_FROZEN" and ml_verdict.action != "ALREADY_FROZEN":
                 agree = heur_verdict.action == ml_verdict.action
 
+            forensics = None
+            if display_action == "FROZEN" and not args.no_forensics:
+                forensics = capture_ram_forensics(pid=pid, fd=int(event.get("fd", -1)))
+
             ts = time.strftime("%H:%M:%S")
             record = {
                 "ts": ts,
@@ -167,6 +172,9 @@ def run_defender(args: argparse.Namespace) -> int:
                 "type": ev_type,
                 "comm": event.get("comm", ""),
                 "name": event.get("name", ""),
+                "vfs_memfd": bool(event.get("vfs_memfd", False)),
+                "vfs_ino": int(event.get("vfs_ino", 0) or 0),
+                "vfs_name": event.get("vfs_name", ""),
                 "exe": ctx.exe,
                 "ancestry": [c for _, c in ctx.ancestry],
                 "engine": args.engine,
@@ -177,6 +185,7 @@ def run_defender(args: argparse.Namespace) -> int:
                 "mtti_ms": mtti_ms,
                 "error": mitigation_err,
                 "reasons": verdict.reasons,
+                "forensics": forensics,
                 "heur_action": heur_verdict.action,
                 "heur_score": heur_verdict.score,
                 "heur_ms": heur_ms,
@@ -229,6 +238,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-shadow", action="store_true", help="Disable shadow ML scoring when engine=heuristic")
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG, help="Path to JSONL event log")
     parser.add_argument("--kernel-freeze", action="store_true", help="Freeze tracked memfd exec inside eBPF via bpf_send_signal")
+    parser.add_argument("--no-forensics", action="store_true", help="Disable automatic RAM ELF forensic carving")
     parser.add_argument("--dry-run", action="store_true", help="Classify and log without sending SIGSTOP")
     parser.add_argument("--show-all", action="store_true", help="Print benign ALLOW events as well")
     return parser.parse_args()

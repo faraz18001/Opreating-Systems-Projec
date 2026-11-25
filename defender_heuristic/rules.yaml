@@ -4,6 +4,7 @@ thresholds:
   high_entropy: 6.5
 
 weights:
+  vfs_verified_memfd: 75
   tracked_memfd_execveat: 70
   untracked_empty_path_execveat: 45
   proc_fd_execve: 70

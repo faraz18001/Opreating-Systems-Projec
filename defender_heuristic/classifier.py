@@ -49,8 +49,11 @@ class HeuristicClassifier:
     def _is_allowlisted(self, event_comm: str, ctx: ProcessContext) -> bool:
         if event_comm in self.allowlist_comms or ctx.comm in self.allowlist_comms:
             return True
-        if len(ctx.ancestry) > 1 and ctx.ancestry[1][1] in self.allowlist_comms:
-            return True
+        if len(ctx.ancestry) > 1:
+            parent_pid, parent_comm = ctx.ancestry[1]
+            # Never trust PID 1 (systemd/init) as an allowlisted parent: orphaned processes reparent to PID 1.
+            if parent_pid != 1 and parent_comm != "systemd" and parent_comm in self.allowlist_comms:
+                return True
         return False
 
     def _matches_kthread(self, name: str) -> bool:
@@ -65,6 +68,9 @@ class HeuristicClassifier:
         ev_name = event.get("name", "")
         ev_comm = event.get("comm", "")
         tracked_memfd = bool(event.get("tracked_memfd", False))
+        vfs_memfd = bool(event.get("vfs_memfd", False))
+        vfs_name = event.get("vfs_name", "")
+        vfs_ino = int(event.get("vfs_ino", 0) or 0)
 
         state = self.pid_states.get(pid)
         if state is None:
@@ -84,7 +90,11 @@ class HeuristicClassifier:
             state.memfd_name = ev_name
             return Verdict(score=0, action="ALLOW", reasons=["memfd buffer created"], entropy=ctx.entropy)
 
-        if ev_type == "execveat":
+        if vfs_memfd and ev_type in ("execveat", "execve_fd"):
+            score += self.weights.get("vfs_verified_memfd", 75)
+            reasons.append(f"kernel VFS verified tmpfs {vfs_name or 'memfd'} (inode {vfs_ino})")
+            state.exec_from_memfd = True
+        elif ev_type == "execveat":
             if tracked_memfd or state.created_memfd:
                 score += self.weights["tracked_memfd_execveat"]
                 reasons.append(f"execveat on tracked memfd ({ev_name or state.memfd_name})")

@@ -6,6 +6,7 @@
 #define AT_EMPTY_PATH 0x1000
 #define PR_SET_NAME   15
 #define SIGSTOP_NUM   19
+#define TMPFS_MAGIC   0x01021994UL
 
 struct memfd_pending {
     unsigned int flags;
@@ -88,25 +89,109 @@ static __always_inline u32 get_ppid(void) {
     return BPF_CORE_READ(task, real_parent, tgid);
 }
 
+static __always_inline int inspect_fd_vfs(int dfd, char out_name[MAX_NAME_LEN], u64 *out_ino) {
+    if (dfd < 0 || dfd >= 65536) {
+        return 0;
+    }
+
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct files_struct *files = BPF_CORE_READ(task, files);
+    if (!files) {
+        return 0;
+    }
+
+    struct fdtable *fdt = BPF_CORE_READ(files, fdt);
+    if (!fdt) {
+        return 0;
+    }
+
+    unsigned int max_fds = BPF_CORE_READ(fdt, max_fds);
+    u32 ufd = (u32)dfd;
+    if (ufd >= max_fds) {
+        return 0;
+    }
+
+    struct file **fd_arr = BPF_CORE_READ(fdt, fd);
+    if (!fd_arr) {
+        return 0;
+    }
+
+    struct file *filp = NULL;
+    if (bpf_probe_read_kernel(&filp, sizeof(filp), fd_arr + ufd) != 0 || !filp) {
+        return 0;
+    }
+
+    struct inode *inode = BPF_CORE_READ(filp, f_inode);
+    if (!inode) {
+        return 0;
+    }
+
+    unsigned long magic = BPF_CORE_READ(inode, i_sb, s_magic);
+    u64 ino = BPF_CORE_READ(inode, i_ino);
+    const unsigned char *dname = BPF_CORE_READ(filp, f_path.dentry, d_name.name);
+
+    char d_buf[MAX_NAME_LEN] = {};
+    if (dname) {
+        bpf_probe_read_kernel_str(d_buf, sizeof(d_buf), dname);
+    }
+
+    int is_memfd_dname = (d_buf[0] == 'm' && d_buf[1] == 'e' && d_buf[2] == 'm' &&
+                          d_buf[3] == 'f' && d_buf[4] == 'd' && d_buf[5] == ':');
+    if (magic == TMPFS_MAGIC && is_memfd_dname) {
+        *out_ino = ino;
+        __builtin_memcpy(out_name, d_buf, MAX_NAME_LEN);
+        return 1;
+    }
+    return 0;
+}
+
+static __always_inline int parse_proc_self_fd(const char path[MAX_NAME_LEN]) {
+    if (!(path[0] == '/' && path[1] == 'p' && path[2] == 'r' && path[3] == 'o' &&
+          path[4] == 'c' && path[5] == '/' && path[6] == 's' && path[7] == 'e' &&
+          path[8] == 'l' && path[9] == 'f' && path[10] == '/' && path[11] == 'f' &&
+          path[12] == 'd' && path[13] == '/')) {
+        return -1;
+    }
+
+    int val = 0;
+    int digits = 0;
+    #pragma unroll
+    for (int i = 14; i < 20; i++) {
+        char c = path[i];
+        if (c >= '0' && c <= '9') {
+            val = val * 10 + (c - '0');
+            digits++;
+        } else {
+            break;
+        }
+    }
+    return digits > 0 ? val : -1;
+}
+
 static __always_inline void fill_common(struct sensor_event *ev, u32 type, u32 ns_tgid) {
     ev->ktime_ns = bpf_ktime_get_ns();
     ev->freeze_ktime_ns = 0;
+    ev->vfs_ino = 0;
     ev->event_type = type;
     ev->pid = ns_tgid;
     ev->ppid = get_ppid();
     ev->uid = (u32)bpf_get_current_uid_gid();
+    ev->vfs_memfd = 0;
     ev->kernel_frozen = 0;
+    ev->vfs_name[0] = '\0';
     bpf_get_current_comm(&ev->comm, sizeof(ev->comm));
 }
 
 SEC("tracepoint/sched/sched_process_fork")
 int tp_sched_process_fork(struct trace_event_raw_sched_process_fork *ctx) {
-    u32 parent_pid = (u32)ctx->parent_pid;
-    u32 child_pid = (u32)ctx->child_pid;
-    u32 *tracked = bpf_map_lookup_elem(&memfd_tgids, &parent_pid);
-    if (tracked) {
-        u32 one = 1;
-        bpf_map_update_elem(&memfd_tgids, &child_pid, &one, BPF_ANY);
+    u32 parent_ns = 0;
+    if (get_ns_tgid(&parent_ns) == 0) {
+        u32 *tracked = bpf_map_lookup_elem(&memfd_tgids, &parent_ns);
+        if (tracked) {
+            u32 child_pid = (u32)ctx->child_pid;
+            u32 one = 1;
+            bpf_map_update_elem(&memfd_tgids, &child_pid, &one, BPF_ANY);
+        }
     }
     return 0;
 }
@@ -205,6 +290,13 @@ int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
         }
     }
 
+    char vfs_name[MAX_NAME_LEN] = {};
+    u64 vfs_ino = 0;
+    int vfs_is_memfd = inspect_fd_vfs(dfd, vfs_name, &vfs_ino);
+    if (vfs_is_memfd) {
+        tracked_flag = 1;
+    }
+
     if (!tracked_flag && !is_empty_path) {
         return 0;
     }
@@ -218,8 +310,11 @@ int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
     ev->fd = dfd;
     ev->flags = flags;
     ev->is_tracked_memfd = tracked_flag;
+    ev->vfs_memfd = vfs_is_memfd ? 1 : 0;
+    ev->vfs_ino = vfs_ino;
+    __builtin_memcpy(ev->vfs_name, vfs_name, sizeof(ev->vfs_name));
 
-    if (tracked_flag && is_kernel_freeze_enabled()) {
+    if ((vfs_is_memfd || tracked_flag) && is_kernel_freeze_enabled()) {
         if (bpf_send_signal(SIGSTOP_NUM) == 0) {
             ev->kernel_frozen = 1;
             ev->freeze_ktime_ns = bpf_ktime_get_ns();
@@ -228,6 +323,8 @@ int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
 
     if (meta) {
         __builtin_memcpy(ev->name, meta->name, sizeof(ev->name));
+    } else if (vfs_is_memfd) {
+        __builtin_memcpy(ev->name, vfs_name, sizeof(ev->name));
     } else if (filename) {
         bpf_probe_read_user_str(&ev->name, sizeof(ev->name), filename);
     }
@@ -256,7 +353,12 @@ int tp_enter_execve(struct trace_event_raw_sys_enter *ctx) {
                         path[3] == 'o' && path[4] == 'c' && path[5] == '/');
     u32 *tracked = bpf_map_lookup_elem(&memfd_tgids, &tgid);
 
-    if (!is_proc_path && !tracked) {
+    int parsed_fd = is_proc_path ? parse_proc_self_fd(path) : -1;
+    char vfs_name[MAX_NAME_LEN] = {};
+    u64 vfs_ino = 0;
+    int vfs_is_memfd = (parsed_fd >= 0) ? inspect_fd_vfs(parsed_fd, vfs_name, &vfs_ino) : 0;
+
+    if (!is_proc_path && !tracked && !vfs_is_memfd) {
         return 0;
     }
 
@@ -266,11 +368,14 @@ int tp_enter_execve(struct trace_event_raw_sys_enter *ctx) {
     }
 
     fill_common(ev, EVENT_EXECVE_FD, tgid);
-    ev->fd = -1;
+    ev->fd = parsed_fd;
     ev->flags = 0;
-    ev->is_tracked_memfd = tracked ? 1 : 0;
+    ev->is_tracked_memfd = (tracked || vfs_is_memfd) ? 1 : 0;
+    ev->vfs_memfd = vfs_is_memfd ? 1 : 0;
+    ev->vfs_ino = vfs_ino;
+    __builtin_memcpy(ev->vfs_name, vfs_name, sizeof(ev->vfs_name));
 
-    if (is_proc_path && tracked && is_kernel_freeze_enabled()) {
+    if ((vfs_is_memfd || (is_proc_path && tracked)) && is_kernel_freeze_enabled()) {
         if (bpf_send_signal(SIGSTOP_NUM) == 0) {
             ev->kernel_frozen = 1;
             ev->freeze_ktime_ns = bpf_ktime_get_ns();
