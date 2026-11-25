@@ -6,6 +6,7 @@ import os
 import platform
 import queue
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -13,10 +14,8 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 from urllib.parse import urlparse
-
-import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFENDER_DIR = PROJECT_ROOT / "defender_heuristic"
@@ -25,9 +24,8 @@ sys.path.insert(0, str(DEFENDER_DIR))
 from mitigator import kill_process, resume_process  # noqa: E402
 
 DEFENDER_SCRIPT = DEFENDER_DIR / "main.py"
-RULES_FILE = DEFENDER_DIR / "rules.yaml"
 MODEL_FILE = PROJECT_ROOT / "defender_ml" / "model.joblib"
-METRICS_FILE = PROJECT_ROOT / "defender_ml" / "metrics.json"
+ML_METRICS_FILE = PROJECT_ROOT / "defender_ml" / "metrics.json"
 LOG_FILE = PROJECT_ROOT / "logs" / "defender_events.jsonl"
 LOADER_BIN = PROJECT_ROOT / "red_team" / "build" / "loader"
 VERIFY_IO_SCRIPT = PROJECT_ROOT / "evaluation" / "verify_disk_io.py"
@@ -37,17 +35,11 @@ FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
 shutdown_event = threading.Event()
 
 
-class ConsoleHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-    allow_reuse_address = True
-
-
 def read_ml_metrics() -> Optional[dict]:
-    if not METRICS_FILE.exists():
+    if not ML_METRICS_FILE.exists():
         return None
     try:
-        with open(METRICS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return json.loads(ML_METRICS_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
 
@@ -74,17 +66,76 @@ def read_rss_mb(pid: int) -> float:
     return 0.0
 
 
+class ConsoleHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class MockC2Server:
+    def __init__(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        self.sock.listen(16)
+        self.sock.settimeout(0.2)
+        self.lock = threading.Lock()
+        self.leaks: List[dict] = []
+        self._stop = False
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        while not self._stop:
+            try:
+                conn, _ = self.sock.accept()
+                raw = conn.recv(512).decode("utf-8", errors="replace").strip()
+                conn.close()
+                if raw:
+                    entry = {
+                        "ts": time.strftime("%H:%M:%S"),
+                        "bytes": len(raw.encode("utf-8")),
+                        "payload": raw,
+                    }
+                    with self.lock:
+                        self.leaks.append(entry)
+                        if len(self.leaks) > 50:
+                            self.leaks = self.leaks[-50:]
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+    def snapshot(self) -> List[dict]:
+        with self.lock:
+            return list(self.leaks)
+
+    def clear(self) -> None:
+        with self.lock:
+            self.leaks.clear()
+
+    def close(self) -> None:
+        self._stop = True
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 class DefenderController:
-    def __init__(self, log_path: Path):
+    def __init__(self, log_path: Path, c2: MockC2Server):
         self.log_path = log_path
+        self.c2 = c2
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.proc: Optional[subprocess.Popen] = None
-        self.dry_run = False
+        self.kernel_freeze = True
         self.engine = "heuristic"
         self.last_error: Optional[str] = None
         self.events: List[dict] = []
         self.subscribers: List[queue.Queue] = []
+        self.disk_io_proof: Optional[dict] = None
+        self.fim_proof: Optional[dict] = None
         self._load_existing_events()
         self._tail_thread = threading.Thread(target=self._tail_log_loop, daemon=True)
         self._tail_thread.start()
@@ -125,7 +176,7 @@ class DefenderController:
         last_inode = None
         offset = self.log_path.stat().st_size
 
-        while True:
+        while not shutdown_event.is_set():
             try:
                 st = self.log_path.stat()
                 if last_inode is not None and (st.st_ino != last_inode or st.st_size < offset):
@@ -146,12 +197,12 @@ class DefenderController:
                         with self.lock:
                             rec["id"] = (self.events[-1]["id"] + 1) if self.events else 1
                             self.events.append(rec)
-                            if len(self.events) > 400:
-                                self.events = self.events[-400:]
+                            if len(self.events) > 300:
+                                self.events = self.events[-300:]
                         self._broadcast("telemetry", rec)
             except OSError:
                 pass
-            time.sleep(0.12)
+            time.sleep(0.1)
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=200)
@@ -167,30 +218,33 @@ class DefenderController:
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, dry_run: bool = False, engine: str = "heuristic") -> dict:
-        if engine not in ("heuristic", "ml"):
-            engine = "heuristic"
+    def start(self, kernel_freeze: Optional[bool] = None, engine: Optional[str] = None) -> dict:
         with self.lock:
+            if kernel_freeze is not None:
+                self.kernel_freeze = kernel_freeze
+            if engine in ("heuristic", "ml"):
+                self.engine = engine
             if self.is_running():
                 return self.get_status_unlocked()
             if os.geteuid() != 0:
                 self.last_error = "Root privileges required. Start ui/server.py with sudo."
                 return self.get_status_unlocked()
+            if self.engine == "ml" and not MODEL_FILE.exists():
+                self.last_error = "ML model bundle missing. Run 'python3 defender_ml/train.py'."
+                return self.get_status_unlocked()
 
             cmd = [
                 sys.executable,
                 str(DEFENDER_SCRIPT),
-                "--engine",
-                engine,
                 "--show-all",
+                "--engine",
+                self.engine,
                 "--log",
                 str(self.log_path),
             ]
-            if dry_run:
-                cmd.append("--dry-run")
+            if self.kernel_freeze:
+                cmd.append("--kernel-freeze")
 
-            self.dry_run = dry_run
-            self.engine = engine
             self.last_error = None
             self.proc = subprocess.Popen(
                 cmd,
@@ -199,7 +253,7 @@ class DefenderController:
                 text=True,
             )
 
-        time.sleep(0.45)
+        time.sleep(0.55)
         with self.lock:
             if self.proc is not None and self.proc.poll() is not None:
                 err_txt = self.proc.stderr.read().strip() if self.proc.stderr else "defender exited"
@@ -207,7 +261,7 @@ class DefenderController:
                 self.proc = None
             status = self.get_status_unlocked()
 
-        self._broadcast("status", status)
+        self._broadcast("status", {"status": status, "quarantine": self.get_quarantine(), "c2_leaks": self.c2.snapshot()})
         return status
 
     def stop(self) -> dict:
@@ -221,90 +275,83 @@ class DefenderController:
             self.proc = None
             status = self.get_status_unlocked()
 
-        self._broadcast("status", status)
+        self._broadcast("status", {"status": status, "quarantine": self.get_quarantine(), "c2_leaks": self.c2.snapshot()})
         return status
 
-    def clear_events(self) -> None:
+    def reconfigure(self, kernel_freeze: Optional[bool] = None, engine: Optional[str] = None) -> dict:
+        was_running = self.is_running()
+        if was_running:
+            self.stop()
+        with self.lock:
+            if kernel_freeze is not None:
+                self.kernel_freeze = kernel_freeze
+            if engine in ("heuristic", "ml"):
+                self.engine = engine
+        if was_running:
+            return self.start(kernel_freeze=self.kernel_freeze, engine=self.engine)
+        status = self.get_status()
+        self._broadcast("status", {"status": status, "quarantine": self.get_quarantine(), "c2_leaks": self.c2.snapshot()})
+        return status
+
+    def clear_all(self) -> None:
         with self.lock:
             self.events = []
+        self.c2.clear()
         try:
             self.log_path.write_text("", encoding="utf-8")
         except OSError:
             pass
         self._broadcast("cleared", {"ok": True})
 
-    def get_quarantine(self) -> List[dict]:
+    def get_quarantine(self) -> List[int]:
         with self.lock:
-            frozen_by_pid: Dict[int, dict] = {}
-            for ev in self.events:
-                if ev.get("action") == "FROZEN":
-                    frozen_by_pid[int(ev["pid"])] = ev
-
-        items = []
-        for pid, ev in sorted(frozen_by_pid.items(), key=lambda x: x[1].get("epoch", 0), reverse=True):
-            state = read_proc_state(pid)
-            if state == "exited" or state.startswith("Z") or state.startswith("X"):
-                continue
-            items.append({
-                "pid": pid,
-                "comm": ev.get("comm", ""),
-                "name": ev.get("name", ""),
-                "exe": ev.get("exe", ""),
-                "ancestry": ev.get("ancestry", []),
-                "score": ev.get("score", 0),
-                "entropy": ev.get("entropy"),
-                "mtti_ms": ev.get("mtti_ms"),
-                "ts": ev.get("ts", ""),
-                "proc_state": state,
-                "reasons": ev.get("reasons", []),
-            })
-        return items
+            frozen_pids = {int(ev["pid"]) for ev in self.events if ev.get("action") == "FROZEN"}
+        alive_stopped = []
+        for pid in sorted(frozen_pids, reverse=True):
+            if read_proc_state(pid).startswith("T"):
+                alive_stopped.append(pid)
+        return alive_stopped
 
     def get_status_unlocked(self) -> dict:
         running = self.is_running()
         rss_mb = read_rss_mb(self.proc.pid) if running and self.proc else 0.0
         frozen_events = [e for e in self.events if e.get("action") == "FROZEN"]
         allow_events = [e for e in self.events if e.get("action") == "ALLOW"]
-        alert_events = [e for e in self.events if e.get("action") in ("ALERT", "WOULD_FREEZE")]
         mttis = [float(e["mtti_ms"]) for e in frozen_events if e.get("mtti_ms") is not None]
-        avg_mtti = round(sum(mttis) / len(mttis), 3) if mttis else None
-        compared = [e for e in self.events if isinstance(e.get("agree"), bool)]
-        agreement_rate = (
-            round((sum(1 for e in compared if e["agree"]) / len(compared)) * 100.0, 1)
-            if compared
-            else None
-        )
-        h_ms = [
-            float(e["heuristic"]["infer_ms"])
-            for e in self.events
-            if isinstance(e.get("heuristic"), dict) and e["heuristic"].get("infer_ms") is not None
-        ]
-        m_ms = [
-            float(e["ml"]["infer_ms"])
-            for e in self.events
-            if isinstance(e.get("ml"), dict) and e["ml"].get("infer_ms") is not None
-        ]
+        avg_mtti = round(sum(mttis) / len(mttis), 4) if mttis else None
+        leaks = self.c2.snapshot()
+
+        compared = [e for e in self.events if e.get("agree") is not None]
+        agreed = sum(1 for e in compared if e.get("agree") is True)
+        agreement_rate = round((agreed / len(compared)) * 100.0, 1) if compared else None
+
+        heur_times = [float(e["heur_ms"]) for e in self.events if isinstance(e.get("heur_ms"), (int, float))]
+        ml_times = [float(e["ml_ms"]) for e in self.events if isinstance(e.get("ml_ms"), (int, float))]
 
         return {
             "running": running,
-            "pid": self.proc.pid if running and self.proc else None,
-            "dry_run": self.dry_run,
             "engine": self.engine,
-            "ml_available": MODEL_FILE.exists(),
-            "ml_metrics": read_ml_metrics(),
-            "agreement_rate": agreement_rate,
-            "compared_count": len(compared),
-            "avg_heuristic_infer_ms": round(sum(h_ms) / len(h_ms), 4) if h_ms else None,
-            "avg_ml_infer_ms": round(sum(m_ms) / len(m_ms), 4) if m_ms else None,
+            "mode": "in-kernel" if self.kernel_freeze else "userspace",
+            "kernel_freeze": self.kernel_freeze,
             "is_root": os.geteuid() == 0,
             "kernel": platform.release(),
-            "probes": 5,
+            "probes": 6,
+            "c2_port": self.c2.port,
             "rss_mb": rss_mb,
             "total_events": len(self.events),
             "frozen_count": len(frozen_events),
-            "alert_count": len(alert_events),
             "allowed_count": len(allow_events),
             "avg_mtti_ms": avg_mtti,
+            "c2_leak_count": len(leaks),
+            "c2_leak_bytes": sum(item["bytes"] for item in leaks),
+            "ml_available": MODEL_FILE.exists(),
+            "ml_metrics": read_ml_metrics(),
+            "compared_count": len(compared),
+            "agreement_rate": agreement_rate,
+            "avg_heuristic_infer_ms": round(sum(heur_times) / len(heur_times), 4) if heur_times else None,
+            "avg_ml_infer_ms": round(sum(ml_times) / len(ml_times), 4) if ml_times else None,
+            "disk_io_proof": self.disk_io_proof,
+            "fim_proof": self.fim_proof,
             "last_error": self.last_error,
         }
 
@@ -317,146 +364,79 @@ class DefenderController:
             return list(self.events)
 
 
-controller: Optional[DefenderController] = None
+c2_server = MockC2Server()
+controller = DefenderController(LOG_FILE, c2_server)
 
 
 def run_demo_command(action: str) -> dict:
     if action == "attack":
         if not LOADER_BIN.exists():
-            return {"ok": False, "action": action, "output": "loader binary missing; run make first", "metrics": {}}
+            return {"ok": False, "error": "loader binary missing; run make first"}
+        before_leaks = len(c2_server.snapshot())
         proc = subprocess.Popen(
-            [str(LOADER_BIN), "--ticks", "20"],
+            [str(LOADER_BIN), "--ticks", "20", "--exfil-port", str(c2_server.port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         threading.Thread(target=proc.wait, daemon=True).start()
         time.sleep(0.28)
         state = read_proc_state(proc.pid)
-        stopped = state.startswith("T")
+        after_leaks = len(c2_server.snapshot())
         return {
             "ok": True,
-            "action": action,
             "pid": proc.pid,
             "proc_state": state,
-            "verdict": "Frozen (SIGSTOP)" if stopped else f"Running ({state})",
-            "metrics": {
-                "PID": str(proc.pid),
-                "Kernel state": state,
-                "Disk bytes written": "0 B",
-            },
-            "output": f"Launched fileless loader (pid={proc.pid}, state={state})",
+            "frozen": state.startswith("T"),
+            "leaked": after_leaks > before_leaks,
         }
 
     if action == "benign":
         if not LOADER_BIN.exists():
-            return {"ok": False, "action": action, "output": "loader binary missing; run make first", "metrics": {}}
-        start = time.monotonic()
-        res = subprocess.run(
-            [str(LOADER_BIN), "--benign-memfd"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        elapsed_ms = round((time.monotonic() - start) * 1000.0, 1)
-        raw = (res.stdout + res.stderr).strip()
-        pid_val = "n/a"
-        fd_val = "n/a"
-        for tok in raw.replace("(", " ").replace(")", " ").replace(",", " ").split():
-            if tok.startswith("pid="):
-                pid_val = tok.split("=", 1)[1]
-            elif tok.startswith("fd="):
-                fd_val = tok.split("=", 1)[1]
-        return {
-            "ok": res.returncode == 0,
-            "action": action,
-            "verdict": "Allowed (no exec)" if res.returncode == 0 else "Failed",
-            "metrics": {
-                "PID": pid_val,
-                "memfd descriptor": f"fd {fd_val}",
-                "Duration": f"{elapsed_ms} ms",
-            },
-            "output": raw,
-        }
+            return {"ok": False, "error": "loader binary missing; run make first"}
+        res = subprocess.run([str(LOADER_BIN), "--benign-memfd"], capture_output=True, text=True, timeout=5)
+        return {"ok": res.returncode == 0}
 
-    if action == "disk-io":
+    if action in ("disk-io", "fim"):
+        was_running = controller.is_running()
+        if was_running:
+            controller.stop()
         try:
-            res = subprocess.run(
-                [sys.executable, str(VERIFY_IO_SCRIPT)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except subprocess.TimeoutExpired:
-            return {
-                "ok": False,
-                "action": action,
-                "verdict": "Timed out (toggle Dry-run ON)",
-                "metrics": {"Status": "Paused by active SIGSTOP"},
-                "output": "Test loader was frozen by active SIGSTOP protection. Enable Dry-run mode before running Verify disk I/O.",
-            }
-        raw = (res.stdout + res.stderr).strip()
-        write_b = "0 bytes"
-        read_b = "0 bytes"
-        ram_b = "n/a"
-        for line in raw.splitlines():
-            if "physical write_bytes" in line:
-                write_b = line.split(":", 1)[1].strip()
-            elif "physical read_bytes" in line:
-                read_b = line.split(":", 1)[1].strip()
-            elif "logical wchar" in line:
-                ram_b = line.split(":", 1)[1].strip()
-        return {
-            "ok": res.returncode == 0,
-            "action": action,
-            "verdict": "Pass (0 B disk I/O)" if res.returncode == 0 else "Fail",
-            "metrics": {
-                "Physical write_bytes": write_b,
-                "Physical read_bytes": read_b,
-                "RAM wchar": ram_b,
-            },
-            "output": raw,
-        }
+            script = VERIFY_IO_SCRIPT if action == "disk-io" else FIM_SCRIPT
+            res = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=10)
+            raw = (res.stdout + res.stderr).strip()
+            if action == "disk-io":
+                write_b = 0
+                ram_b = 0
+                for line in raw.splitlines():
+                    if "physical write_bytes" in line:
+                        try:
+                            write_b = int(line.split(":", 1)[1].strip().split()[0])
+                        except ValueError:
+                            pass
+                    elif "logical wchar" in line:
+                        try:
+                            ram_b = int(line.split(":", 1)[1].strip().split()[0])
+                        except ValueError:
+                            pass
+                proof = {"ok": res.returncode == 0, "write_bytes": write_b, "ram_bytes": ram_b, "ts": time.strftime("%H:%M:%S")}
+                controller.disk_io_proof = proof
+                return proof
+            else:
+                detected = 0
+                for line in raw.splitlines():
+                    if "fileless payload detected" in line:
+                        try:
+                            detected = int(line.split(":", 1)[1].strip().split()[0])
+                        except ValueError:
+                            pass
+                proof = {"ok": res.returncode == 0, "detected": detected, "ts": time.strftime("%H:%M:%S")}
+                controller.fim_proof = proof
+                return proof
+        finally:
+            if was_running:
+                controller.start()
 
-    if action == "fim":
-        try:
-            res = subprocess.run(
-                [sys.executable, str(FIM_SCRIPT)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except subprocess.TimeoutExpired:
-            return {
-                "ok": False,
-                "action": action,
-                "verdict": "Timed out (toggle Dry-run ON)",
-                "metrics": {"Status": "Paused by active SIGSTOP"},
-                "output": "Test loader was frozen by active SIGSTOP protection. Enable Dry-run mode before running Run FIM baseline.",
-            }
-        raw = (res.stdout + res.stderr).strip()
-        fs_events = "0"
-        detected = "0"
-        elapsed = "n/a"
-        for line in raw.splitlines():
-            if "Traditional FIM finished in" in line:
-                elapsed = line.split("finished in", 1)[1].strip()
-            elif "total unrelated fs events" in line:
-                fs_events = line.split(":", 1)[1].strip()
-            elif "fileless payload detected" in line:
-                detected = line.split(":", 1)[1].strip().split()[0]
-        return {
-            "ok": res.returncode == 0,
-            "action": action,
-            "verdict": f"Blind ({detected} alerts)",
-            "metrics": {
-                "inotify detections": detected,
-                "FS events seen": fs_events,
-                "Elapsed": elapsed,
-            },
-            "output": raw,
-        }
-
-    return {"ok": False, "action": action, "verdict": "Error", "metrics": {}, "output": f"Unknown demo action: {action}"}
+    return {"ok": False, "error": f"unknown action: {action}"}
 
 
 class ConsoleHandler(BaseHTTPRequestHandler):
@@ -478,9 +458,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
             return {}
-        raw = self.rfile.read(length)
         try:
-            return json.loads(raw.decode("utf-8"))
+            return json.loads(self.rfile.read(length).decode("utf-8"))
         except json.JSONDecodeError:
             return {}
 
@@ -492,32 +471,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
+        path = urlparse(self.path).path
 
         if path == "/api/status":
             self._send_json(controller.get_status())
+            return
+
+        if path == "/api/ml/metrics":
+            self._send_json({"available": MODEL_FILE.exists(), "metrics": read_ml_metrics()})
             return
 
         if path == "/api/events":
             self._send_json({
                 "events": controller.get_events(),
                 "quarantine": controller.get_quarantine(),
+                "c2_leaks": c2_server.snapshot(),
                 "status": controller.get_status(),
             })
-            return
-
-        if path == "/api/rules":
-            try:
-                with open(RULES_FILE, "r", encoding="utf-8") as f:
-                    rules = yaml.safe_load(f)
-                self._send_json({"rules": rules})
-            except OSError as exc:
-                self._send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
-            return
-
-        if path == "/api/ml/metrics":
-            self._send_json({"available": MODEL_FILE.exists(), "metrics": read_ml_metrics()})
             return
 
         if path == "/api/stream":
@@ -527,23 +497,37 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self._serve_static(path)
 
     def do_POST(self) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
+        path = urlparse(self.path).path
         body = self._read_json_body()
 
         if path == "/api/defender/start":
-            req_engine = str(body.get("engine", controller.engine))
-            status = controller.start(dry_run=bool(body.get("dry_run", False)), engine=req_engine)
-            self._send_json(status)
+            kf = body.get("kernel_freeze")
+            eng = body.get("engine")
+            self._send_json(
+                controller.start(
+                    kernel_freeze=bool(kf) if kf is not None else None,
+                    engine=str(eng) if eng in ("heuristic", "ml") else None,
+                )
+            )
             return
 
         if path == "/api/defender/stop":
-            status = controller.stop()
-            self._send_json(status)
+            self._send_json(controller.stop())
+            return
+
+        if path == "/api/defender/mode":
+            kf = body.get("kernel_freeze")
+            eng = body.get("engine")
+            self._send_json(
+                controller.reconfigure(
+                    kernel_freeze=bool(kf) if kf is not None else None,
+                    engine=str(eng) if eng in ("heuristic", "ml") else None,
+                )
+            )
             return
 
         if path == "/api/events/clear":
-            controller.clear_events()
+            controller.clear_all()
             self._send_json({"ok": True})
             return
 
@@ -563,17 +547,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_json({
                     "ok": err is None,
                     "pid": pid,
-                    "action": action,
                     "error": err,
-                    "proc_state": read_proc_state(pid),
                     "quarantine": controller.get_quarantine(),
                 })
                 return
 
         if path.startswith("/api/demo/"):
             action = path.split("/api/demo/", 1)[1]
-            result = run_demo_command(action)
-            self._send_json(result)
+            self._send_json(run_demo_command(action))
             return
 
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -588,11 +569,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
         q = controller.subscribe()
         try:
-            init_payload = json.dumps({
+            snap = {
                 "status": controller.get_status(),
                 "quarantine": controller.get_quarantine(),
-            })
-            self.wfile.write(f"event: status\ndata: {init_payload}\n\n".encode("utf-8"))
+                "c2_leaks": c2_server.snapshot(),
+            }
+            self.wfile.write(f"event: status\ndata: {json.dumps(snap)}\n\n".encode("utf-8"))
             self.wfile.flush()
 
             idle_ticks = 0
@@ -600,18 +582,18 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 try:
                     ev_name, payload = q.get(timeout=1.0)
                     idle_ticks = 0
-                    msg = f"event: {ev_name}\ndata: {json.dumps(payload)}\n\n"
-                    self.wfile.write(msg.encode("utf-8"))
+                    self.wfile.write(f"event: {ev_name}\ndata: {json.dumps(payload)}\n\n".encode("utf-8"))
                     self.wfile.flush()
                 except queue.Empty:
                     idle_ticks += 1
-                    if idle_ticks >= 5:
+                    if idle_ticks >= 4:
                         idle_ticks = 0
-                        hb = json.dumps({
+                        hb = {
                             "status": controller.get_status(),
                             "quarantine": controller.get_quarantine(),
-                        })
-                        self.wfile.write(f"event: status\ndata: {hb}\n\n".encode("utf-8"))
+                            "c2_leaks": c2_server.snapshot(),
+                        }
+                        self.wfile.write(f"event: status\ndata: {json.dumps(hb)}\n\n".encode("utf-8"))
                         self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
@@ -620,10 +602,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _serve_static(self, req_path: str) -> None:
         if not FRONTEND_DIST.exists():
-            msg = (
-                "Frontend bundle not built yet. Run 'cd ui/frontend && npm run build', "
-                "or start 'npm run dev' in ui/frontend/ during development."
-            ).encode("utf-8")
+            msg = b"Frontend bundle not built. Run 'cd ui/frontend && npm run build'."
             self.send_response(HTTPStatus.SERVICE_UNAVAILABLE)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(msg)))
@@ -646,34 +625,42 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    global controller
-    parser = argparse.ArgumentParser(description="eBPF Defender Console API and static server")
+    parser = argparse.ArgumentParser(description="MemGuard eBPF Console API and static server")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host")
     parser.add_argument("--port", type=int, default=8080, help="Bind port")
     parser.add_argument("--engine", choices=["heuristic", "ml"], default="heuristic", help="Initial classifier engine")
+    parser.add_argument("--userspace", action="store_true", help="Default to userspace pidfd_send_signal mode")
     parser.add_argument("--auto-start", action="store_true", help="Start the eBPF defender automatically")
     args = parser.parse_args()
 
-    controller = DefenderController(LOG_FILE)
-
+    controller.engine = args.engine
+    if args.userspace:
+        controller.kernel_freeze = False
     if args.auto_start:
-        controller.start(dry_run=False, engine=args.engine)
+        controller.start()
 
     server = ConsoleHTTPServer((args.host, args.port), ConsoleHandler)
 
     def _shutdown(signum, frame):
         shutdown_event.set()
         controller.stop()
+        c2_server.close()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    print(f"[ui] console server listening on http://{args.host}:{args.port}", flush=True)
+    print(
+        f"[ui] console listening on http://{args.host}:{args.port} "
+        f"(engine={controller.engine}, mock C2 on 127.0.0.1:{c2_server.port})",
+        flush=True,
+    )
     try:
         server.serve_forever()
     finally:
+        shutdown_event.set()
         controller.stop()
+        c2_server.close()
         server.server_close()
     return 0
 
