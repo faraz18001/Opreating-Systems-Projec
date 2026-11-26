@@ -109,6 +109,10 @@ class HeuristicClassifier:
                 reasons.append(f"execve via proc fd path ({ev_name})")
                 state.exec_from_memfd = True
 
+        elif ev_type == "mprotect_exec":
+            score += self.weights.get("anon_mprotect_exec", 75)
+            reasons.append(f"anonymous W->X mprotect(PROT_EXEC) transition ({ev_name or 'anon'})")
+
         elif ev_type == "prctl_set_name":
             if self._matches_kthread(ev_name):
                 score += self.weights["kthread_masquerade"]

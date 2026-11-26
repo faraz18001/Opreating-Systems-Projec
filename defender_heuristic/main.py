@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from classifier import HeuristicClassifier
 from forensics import capture_ram_forensics
-from mitigator import freeze_process
+from mitigator import freeze_process, resume_process
 from telemetry import collect_context
 
 DEFAULT_SENSOR = PROJECT_ROOT / "ebpf" / "build" / "sensor"
@@ -129,17 +129,22 @@ def run_defender(args: argparse.Namespace) -> int:
             freeze_mode = "in-kernel" if kernel_frozen else "userspace"
 
             if kernel_frozen:
-                ktime_ns = int(event.get("ktime_ns", 0))
-                fktime_ns = int(event.get("freeze_ktime_ns", 0))
-                if fktime_ns >= ktime_ns and ktime_ns > 0:
-                    mtti_ms = round((fktime_ns - ktime_ns) / 1_000_000.0, 4)
+                if verdict.action == "ALLOW":
+                    resume_process(pid)
+                    display_action = "ALLOW"
+                    verdict.reasons.append("stage-2 auto-resumed allowlisted caller via SIGCONT")
                 else:
-                    mtti_ms = 0.005
-                heur_clf.mark_frozen(pid)
-                if ml_clf is not None:
-                    ml_clf.mark_frozen(pid)
-                display_action = "FROZEN"
-                verdict.reasons.append("frozen synchronously in-kernel via bpf_send_signal(SIGSTOP)")
+                    ktime_ns = int(event.get("ktime_ns", 0))
+                    fktime_ns = int(event.get("freeze_ktime_ns", 0))
+                    if fktime_ns >= ktime_ns and ktime_ns > 0:
+                        mtti_ms = round((fktime_ns - ktime_ns) / 1_000_000.0, 4)
+                    else:
+                        mtti_ms = 0.005
+                    heur_clf.mark_frozen(pid)
+                    if ml_clf is not None:
+                        ml_clf.mark_frozen(pid)
+                    display_action = "FROZEN"
+                    verdict.reasons.append("frozen synchronously in-kernel via bpf_send_signal(SIGSTOP)")
             elif verdict.action == "FREEZE":
                 if args.dry_run:
                     display_action = "WOULD_FREEZE"

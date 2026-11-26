@@ -7,7 +7,7 @@ function formatLatency(ms) {
   return `${ms.toFixed(2)} ms`;
 }
 
-export default function MttiStrip({ events }) {
+export default function MttiStrip({ events, onOpenCompare }) {
   const [hoveredIdx, setHoveredIdx] = useState(null);
 
   const samples = events
@@ -22,6 +22,11 @@ export default function MttiStrip({ events }) {
             <h2 id="mtti-heading">Interception latency</h2>
             <p className="panel-head__sub">Syscall entry to SIGSTOP freeze (0 ms baseline).</p>
           </div>
+          {onOpenCompare && (
+            <button type="button" className="btn-link" onClick={onOpenCompare}>
+              Compare graphs
+            </button>
+          )}
         </div>
         <div className="empty-state">
           <p className="empty-state__title">Awaiting first interception</p>
@@ -83,6 +88,11 @@ export default function MttiStrip({ events }) {
           <span className="chart-readout__meta">
             PID {activePoint.sample.pid} ({activePoint.sample.freeze_mode || "userspace"})
           </span>
+          {onOpenCompare && (
+            <button type="button" className="btn-link" onClick={onOpenCompare}>
+              Compare graphs
+            </button>
+          )}
         </div>
       </div>
 

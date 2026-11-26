@@ -19,11 +19,12 @@ static void handle_signal(int sig) {
 
 static const char *event_type_str(unsigned int type) {
     switch (type) {
-        case EVENT_MEMFD_CREATE: return "memfd_create";
-        case EVENT_EXECVEAT:     return "execveat";
-        case EVENT_EXECVE_FD:    return "execve_fd";
-        case EVENT_PRCTL_NAME:   return "prctl_set_name";
-        default:                 return "unknown";
+        case EVENT_MEMFD_CREATE:  return "memfd_create";
+        case EVENT_EXECVEAT:      return "execveat";
+        case EVENT_EXECVE_FD:     return "execve_fd";
+        case EVENT_PRCTL_NAME:    return "prctl_set_name";
+        case EVENT_MPROTECT_EXEC: return "mprotect_exec";
+        default:                  return "unknown";
     }
 }
 

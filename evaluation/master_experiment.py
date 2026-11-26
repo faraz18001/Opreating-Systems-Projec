@@ -28,6 +28,8 @@ VECTORS = [
     ("fork", ["--fork"]),
     ("execve-fd", ["--execve-fd"]),
     ("high-entropy", ["--high-entropy"]),
+    ("mmap-exec", ["--mmap-exec"]),
+    ("scm-fd", ["--scm-fd"]),
 ]
 
 IN_CREATE = 0x00000100
@@ -135,7 +137,7 @@ def run_defense_trials(name: str, defender_args: list, runs_per_vector: int, c2:
                     if is_stopped(p.pid):
                         stopped = True
                         break
-                    if p.poll() is not None and vname != "fork":
+                    if p.poll() is not None and vname not in ("fork", "scm-fd"):
                         break
                     time.sleep(0.015)
 
@@ -203,13 +205,12 @@ def run_defense_trials(name: str, defender_args: list, runs_per_vector: int, c2:
             pass
 
     mttis = [float(r["mtti_ms"]) for r in frozen_recs if isinstance(r.get("mtti_ms"), (int, float))]
-    # Count fork frozen via logged records since orphaned child has new PID
-    if per_vector["fork"]["frozen"] == 0:
-        fork_logged = sum(1 for r in frozen_recs if r.get("ppid") == 1 or (r.get("ancestry") and len(r["ancestry"]) <= 2))
-        if fork_logged > 0:
-            actual_fork = min(runs_per_vector, fork_logged)
-            per_vector["fork"]["frozen"] = actual_fork
-            total_frozen = sum(v["frozen"] for v in per_vector.values())
+    for orphan_vec in ("fork", "scm-fd"):
+        if orphan_vec in per_vector and per_vector[orphan_vec]["frozen"] == 0:
+            logged = sum(1 for r in frozen_recs if r.get("ppid") == 1 or (r.get("ancestry") and len(r["ancestry"]) <= 2))
+            if logged > 0:
+                per_vector[orphan_vec]["frozen"] = min(runs_per_vector, logged)
+                total_frozen = sum(v["frozen"] for v in per_vector.values())
 
     sample_forensics = None
     for r in frozen_recs:
@@ -341,15 +342,16 @@ def main() -> int:
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     c2 = MockC2()
     try:
-        print("[master] running 5 vectors x 4 trials for Userspace Heuristic...", flush=True)
+        n_vec = len(VECTORS)
+        print(f"[master] running {n_vec} vectors x 4 trials for Userspace Heuristic...", flush=True)
         u_heur = run_defense_trials("userspace_heur", ["--no-shadow", "--no-forensics"], 4, c2)
         time.sleep(1.5)
 
-        print("[master] running 5 vectors x 4 trials for Userspace ML (Random Forest)...", flush=True)
+        print(f"[master] running {n_vec} vectors x 4 trials for Userspace ML (Random Forest)...", flush=True)
         u_ml = run_defense_trials("userspace_ml", ["--engine", "ml", "--no-forensics"], 4, c2)
         time.sleep(1.5)
 
-        print("[master] running 5 vectors x 4 trials for In-Kernel VFS eBPF...", flush=True)
+        print(f"[master] running {n_vec} vectors x 4 trials for In-Kernel VFS eBPF...", flush=True)
         k_vfs = run_defense_trials("inkernel_vfs", ["--kernel-freeze", "--no-shadow"], 4, c2)
         time.sleep(1.5)
 
@@ -363,6 +365,7 @@ def main() -> int:
         c2.close()
 
     ml_meta = json.loads(ML_METRICS.read_text(encoding="utf-8")) if ML_METRICS.exists() else {}
+    fim_trials = len(VECTORS) * 4
 
     report = {
         "kernel": platform.release(),
@@ -370,10 +373,10 @@ def main() -> int:
         "trials": {
             "traditional_fim": {
                 "mode": "traditional_fim",
-                "total_trials": 20,
+                "total_trials": fim_trials,
                 "total_frozen": 0,
                 "detection_pct": 0.0,
-                "total_leaks": 20,
+                "total_leaks": fim_trials,
                 "leak_pct": 100.0,
                 "fpr_pct": 0.0,
                 "mtti_mean_ms": None,

@@ -1,7 +1,18 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import CompareModal from "./components/CompareModal.jsx";
 import MttiStrip from "./components/MttiStrip.jsx";
+import TraceModal from "./components/TraceModal.jsx";
 
-const VALID_VIEWS = ["threats", "all"];
+const VALID_VIEWS = ["threats", "all", "traces"];
+const ALL_VECTORS = [
+  "standard",
+  "dup-fd",
+  "fork",
+  "execve-fd",
+  "high-entropy",
+  "mmap-exec",
+  "scm-fd",
+];
 
 function readViewParam() {
   const val = new URLSearchParams(window.location.search).get("view");
@@ -33,11 +44,18 @@ export default function App() {
   const [vector, setVector] = useState("standard");
   const [sensorBusy, setSensorBusy] = useState(false);
   const [attackBusy, setAttackBusy] = useState(false);
+  const [sweepProgress, setSweepProgress] = useState(null);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [traces, setTraces] = useState([]);
+  const [traceQuery, setTraceQuery] = useState("");
+  const [searchResults, setSearchResults] = useState(null);
+  const [activeTraceId, setActiveTraceId] = useState(null);
   const [verifyBusy, setVerifyBusy] = useState(null);
   const [busyPid, setBusyPid] = useState(null);
   const [killTarget, setKillTarget] = useState(null);
   const [notice, setNotice] = useState("");
   const dialogRef = useRef(null);
+  const sweepAbortRef = useRef(false);
 
   useEffect(() => {
     writeViewParam(view);
@@ -51,6 +69,7 @@ export default function App() {
       const data = await res.json();
       const loadedEvents = data.events || [];
       setEvents(loadedEvents);
+      setTraces(data.traces || []);
       if (new URLSearchParams(window.location.search).get("expand") === "first") {
         const latestFrozen = [...loadedEvents].reverse().find((e) => e.action === "FROZEN");
         if (latestFrozen) setExpandedId(latestFrozen.id);
@@ -93,14 +112,59 @@ export default function App() {
       }
     });
 
+    sse.addEventListener("trace", (e) => {
+      try {
+        const t = JSON.parse(e.data);
+        setTraces((prev) => {
+          const next = prev.filter((item) => item.trace_id !== t.trace_id);
+          return [t, ...next].slice(0, 200);
+        });
+        if (t.event_ids?.length) {
+          const idSet = new Set(t.event_ids);
+          setEvents((prev) =>
+            prev.map((ev) => (idSet.has(ev.id) && !ev.trace_id ? { ...ev, trace_id: t.trace_id } : ev))
+          );
+        }
+      } catch {
+        // ignore malformed trace frame
+      }
+    });
+
     sse.addEventListener("cleared", () => {
       setEvents([]);
+      setTraces([]);
+      setSearchResults(null);
+      setActiveTraceId(null);
       setC2Leaks([]);
       setExpandedId(null);
     });
 
     return () => sse.close();
   }, []);
+
+  useEffect(() => {
+    const q = traceQuery.trim();
+    if (!q) {
+      setSearchResults(null);
+      return undefined;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/traces?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
+        if (res.ok) {
+          const data = await res.json();
+          setSearchResults(data.traces || []);
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") setSearchResults(null);
+      }
+    }, 120);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [traceQuery, traces.length]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -126,6 +190,23 @@ export default function App() {
     () => events.filter((e) => e.action === "ALLOW").length,
     [events]
   );
+
+  const traceIdByEventId = useMemo(() => {
+    const m = new Map();
+    for (const t of traces) {
+      for (const eid of t.event_ids || []) {
+        m.set(eid, t.trace_id);
+      }
+    }
+    return m;
+  }, [traces]);
+
+  const visibleTraces = useMemo(() => {
+    if (traceQuery.trim() && searchResults !== null) {
+      return searchResults;
+    }
+    return traces;
+  }, [traces, traceQuery, searchResults]);
 
   async function handleToggleSensor(nextActive) {
     setSensorBusy(true);
@@ -182,16 +263,64 @@ export default function App() {
       });
       const data = await res.json();
       await refreshSnapshot();
+      const tag = data.trace_id ? `[${data.trace_id}] ` : "";
       if (!data.ok) {
         setError(data.error || "Attack launch failed.");
       } else if (data.frozen && !data.leaked) {
-        setNotice(`Vector ${data.vector} frozen in RAM (PID ${data.pid}). Zero bytes reached mock C2.`);
+        setNotice(`${tag}Vector ${data.vector} frozen in RAM (PID ${data.pid}). Zero bytes reached mock C2.`);
       } else if (data.frozen && data.leaked) {
-        setNotice(`Vector ${data.vector} frozen (PID ${data.pid}), but payload won the userspace race and leaked to C2.`);
+        setNotice(`${tag}Vector ${data.vector} frozen (PID ${data.pid}), but payload won the userspace race and leaked to C2.`);
       } else {
-        setNotice(`Sensor is off: vector ${data.vector} (PID ${data.pid}) exfiltrated secret to mock C2.`);
+        setNotice(`${tag}Sensor is off: vector ${data.vector} (PID ${data.pid}) exfiltrated secret to mock C2.`);
       }
     } finally {
+      setAttackBusy(false);
+    }
+  }
+
+  async function handleAutoSweep() {
+    if (sweepProgress !== null) {
+      sweepAbortRef.current = true;
+      return;
+    }
+
+    sweepAbortRef.current = false;
+    setAttackBusy(true);
+    let frozenTotal = 0;
+    let leakedTotal = 0;
+    let completed = 0;
+
+    try {
+      for (let i = 0; i < ALL_VECTORS.length; i++) {
+        if (sweepAbortRef.current) break;
+        const v = ALL_VECTORS[i];
+        setVector(v);
+        setSweepProgress({ idx: i + 1, total: ALL_VECTORS.length, vector: v });
+        setNotice(`Auto-sweep (${i + 1}/${ALL_VECTORS.length}): launching vector ${v}…`);
+
+        const res = await fetch("/api/demo/attack", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ vector: v }),
+        });
+        const data = await res.json();
+        completed += 1;
+        if (data.frozen) frozenTotal += 1;
+        if (data.leaked) leakedTotal += 1;
+        await refreshSnapshot();
+
+        if (!sweepAbortRef.current && i < ALL_VECTORS.length - 1) {
+          await new Promise((r) => setTimeout(r, 220));
+        }
+      }
+      setNotice(
+        sweepAbortRef.current
+          ? `Auto-sweep stopped after ${completed}/${ALL_VECTORS.length} vectors (${frozenTotal} frozen, ${leakedTotal} leaked).`
+          : `Auto-sweep complete (${completed}/${ALL_VECTORS.length} vectors): ${frozenTotal} frozen, ${leakedTotal} C2 leaks.`
+      );
+    } finally {
+      sweepAbortRef.current = false;
+      setSweepProgress(null);
       setAttackBusy(false);
     }
   }
@@ -236,6 +365,10 @@ export default function App() {
   async function handleReset() {
     await fetch("/api/events/clear", { method: "POST" });
     setEvents([]);
+    setTraces([]);
+    setTraceQuery("");
+    setSearchResults(null);
+    setActiveTraceId(null);
     setC2Leaks([]);
     setExpandedId(null);
     setNotice("");
@@ -337,24 +470,38 @@ export default function App() {
               className="vector-select"
               aria-label="Attack evasion vector"
               value={vector}
-              disabled={attackBusy}
+              disabled={attackBusy || sweepProgress !== null}
               onChange={(e) => setVector(e.target.value)}
             >
-              <option value="standard">Standard</option>
-              <option value="dup-fd">dup2 remap</option>
-              <option value="fork">fork handoff</option>
-              <option value="execve-fd">/proc/fd fallback</option>
-              <option value="high-entropy">High-entropy</option>
+              <option value="standard">V1 · Standard</option>
+              <option value="dup-fd">V2 · dup2 remap</option>
+              <option value="fork">V3 · fork handoff</option>
+              <option value="execve-fd">V4 · /proc/fd fallback</option>
+              <option value="high-entropy">V5 · High-entropy</option>
+              <option value="mmap-exec">V6 · mmap W→X</option>
+              <option value="scm-fd">V7 · SCM_RIGHTS /proc/pid/fd</option>
             </select>
 
             <button
               type="button"
+              className="btn btn--sm"
+              disabled={attackBusy && sweepProgress === null}
+              aria-busy={sweepProgress !== null}
+              onClick={handleAutoSweep}
+            >
+              {sweepProgress !== null
+                ? `Stop (${sweepProgress.idx}/${sweepProgress.total})`
+                : "Run all (7)"}
+            </button>
+
+            <button
+              type="button"
               className="btn btn--primary"
-              disabled={attackBusy}
-              aria-busy={attackBusy}
+              disabled={attackBusy || sweepProgress !== null}
+              aria-busy={attackBusy && sweepProgress === null}
               onClick={handleSimulateAttack}
             >
-              {attackBusy ? "Launching…" : "Simulate attack"}
+              {attackBusy && sweepProgress === null ? "Launching…" : "Simulate attack"}
             </button>
           </div>
         </div>
@@ -411,12 +558,21 @@ export default function App() {
                   >
                     All ({events.length})
                   </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    className="view-tab"
+                    aria-selected={view === "traces"}
+                    onClick={() => setView("traces")}
+                  >
+                    Traces ({traces.length})
+                  </button>
                 </div>
 
                 <button
                   type="button"
                   className="btn-link"
-                  disabled={events.length === 0 && c2Leaks.length === 0}
+                  disabled={events.length === 0 && c2Leaks.length === 0 && traces.length === 0}
                   onClick={handleReset}
                 >
                   Reset
@@ -429,6 +585,131 @@ export default function App() {
                 <div className="skeleton-row" />
                 <div className="skeleton-row" />
                 <div className="skeleton-row" />
+              </div>
+            ) : view === "traces" ? (
+              <div className="traces-panel">
+                <div className="trace-search-bar">
+                  <input
+                    type="search"
+                    className="trace-search-input"
+                    value={traceQuery}
+                    onChange={(e) => setTraceQuery(e.target.value)}
+                    placeholder="Search trace ID (TRC-0001), PID, vector, syscall, inode, stdout, or C2 payload…"
+                    aria-label="Search execution traces"
+                  />
+                  {traceQuery && (
+                    <button
+                      type="button"
+                      className="btn btn--ghost"
+                      onClick={() => setTraceQuery("")}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+
+                {visibleTraces.length === 0 ? (
+                  <div className="empty-state">
+                    <p className="empty-state__title">
+                      {traceQuery.trim()
+                        ? `No traces matching "${traceQuery.trim()}"`
+                        : "No execution traces recorded yet"}
+                    </p>
+                    <p className="empty-state__desc">
+                      Run Simulate attack or Run all (7) to capture deep per-iteration logs and click any trace ID to inspect it.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="table-wrap">
+                    <table className="ledger trace-ledger">
+                      <thead>
+                        <tr>
+                          <th>Trace</th>
+                          <th>Vector</th>
+                          <th>PIDs</th>
+                          <th>Timeline</th>
+                          <th>Outcome</th>
+                          <th className="num">MTTI</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visibleTraces.map((t) => {
+                          const isFrozen = t.outcome === "FROZEN";
+                          const isLeak = t.outcome === "EXFILTRATED" || t.outcome === "FALSE_POSITIVE";
+                          const isAllow = t.outcome === "ALLOWED";
+                          return (
+                            <tr
+                              key={t.trace_id}
+                              tabIndex={0}
+                              className={isFrozen ? "is-frozen" : ""}
+                              onClick={() => setActiveTraceId(t.trace_id)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  setActiveTraceId(t.trace_id);
+                                }
+                              }}
+                            >
+                              <td>
+                                <button
+                                  type="button"
+                                  className="trace-pill"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveTraceId(t.trace_id);
+                                  }}
+                                >
+                                  {t.trace_id}
+                                </button>
+                              </td>
+                              <td>
+                                <span className="ledger__proc">{t.vector}</span>
+                                <span className="ledger__sub">
+                                  {t.kind} · {t.ts}
+                                </span>
+                              </td>
+                              <td className="num">
+                                {t.root_pid}
+                                {(t.related_pids?.length || 0) > 1
+                                  ? ` (+${t.related_pids.length - 1})`
+                                  : ""}
+                              </td>
+                              <td>
+                                <span>{t.summary?.event_count ?? 0} ev</span>
+                                {t.types?.length > 0 && (
+                                  <span className="ledger__sub">{t.types.join(", ")}</span>
+                                )}
+                              </td>
+                              <td>
+                                <span
+                                  className={`state-word ${
+                                    isFrozen
+                                      ? "state-word--frozen"
+                                      : isAllow
+                                      ? "state-word--allow"
+                                      : isLeak
+                                      ? "state-word--danger"
+                                      : ""
+                                  }`}
+                                >
+                                  {t.outcome}
+                                </span>
+                                {(t.summary?.c2_leak_count || 0) > 0 && (
+                                  <span className="ledger__sub">
+                                    C2 {t.summary.c2_leak_bytes} B
+                                  </span>
+                                )}
+                              </td>
+                              <td className="num">
+                                {formatMtti(t.summary?.min_mtti_ms)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             ) : rows.length === 0 ? (
               <div className="empty-state">
@@ -456,6 +737,7 @@ export default function App() {
                       const isExpanded = expandedId === ev.id;
                       const isFrozen = ev.action === "FROZEN";
                       const isHeld = quarantine.includes(ev.pid);
+                      const rowTraceId = ev.trace_id || traceIdByEventId.get(ev.id) || null;
                       return (
                         <Fragment key={ev.id}>
                           <tr
@@ -473,6 +755,19 @@ export default function App() {
                             <td>
                               <span className="ledger__proc">{ev.comm || "unknown"}</span>
                               {ev.name && <span className="ledger__sub">{ev.name}</span>}
+                              {rowTraceId && (
+                                <button
+                                  type="button"
+                                  className="trace-pill trace-pill--inline"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActiveTraceId(rowTraceId);
+                                  }}
+                                  title={`Inspect deep execution trace ${rowTraceId}`}
+                                >
+                                  {rowTraceId}
+                                </button>
+                              )}
                             </td>
                             <td>{ev.type}</td>
                             <td>
@@ -488,6 +783,20 @@ export default function App() {
                               <td colSpan={5}>
                                 <div className="inline-detail">
                                   <dl className="detail-dl">
+                                    {rowTraceId && (
+                                      <>
+                                        <dt>Trace ID</dt>
+                                        <dd>
+                                          <button
+                                            type="button"
+                                            className="trace-pill"
+                                            onClick={() => setActiveTraceId(rowTraceId)}
+                                          >
+                                            Open {rowTraceId}
+                                          </button>
+                                        </dd>
+                                      </>
+                                    )}
                                     <dt>Executable</dt>
                                     <dd>{ev.exe || "exited before read"}</dd>
 
@@ -590,7 +899,7 @@ export default function App() {
           </section>
 
           <div className="side-stack">
-            <MttiStrip events={events} />
+            <MttiStrip events={events} onOpenCompare={() => setCompareOpen(true)} />
 
             <section className="surface-panel" aria-labelledby="proof-heading">
               <div className="panel-head">
@@ -639,6 +948,13 @@ export default function App() {
                           ? "Ready"
                           : "Offline"}
                       </span>
+                      <button
+                        type="button"
+                        className="btn-link"
+                        onClick={() => setCompareOpen(true)}
+                      >
+                        Graph
+                      </button>
                       {mlModels.length > 0 && (
                         <button
                           type="button"
@@ -756,6 +1072,17 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      <CompareModal
+        open={compareOpen}
+        events={events}
+        onClose={() => setCompareOpen(false)}
+      />
+
+      <TraceModal
+        traceId={activeTraceId}
+        onClose={() => setActiveTraceId(null)}
+      />
 
       <dialog
         ref={dialogRef}

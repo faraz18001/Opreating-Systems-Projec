@@ -7,10 +7,23 @@
 #define PR_SET_NAME   15
 #define SIGSTOP_NUM   19
 #define TMPFS_MAGIC   0x01021994UL
+#define PROT_WRITE    0x2
+#define PROT_EXEC     0x4
+#define MAP_ANONYMOUS 0x20
 
 struct memfd_pending {
     unsigned int flags;
     char name[MAX_NAME_LEN];
+};
+
+struct mmap_pending {
+    unsigned int prot;
+    unsigned int flags;
+};
+
+struct addr_key {
+    u32 tgid;
+    u64 addr;
 };
 
 struct fd_key {
@@ -62,6 +75,20 @@ struct {
     __type(key, u32);
     __type(value, u32);
 } memfd_tgids SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, u64);
+    __type(value, struct mmap_pending);
+} pending_mmap SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, struct addr_key);
+    __type(value, u32);
+} anon_rw_maps SEC(".maps");
 
 static __always_inline int get_ns_tgid(u32 *out_tgid) {
     u32 zero = 0;
@@ -145,19 +172,31 @@ static __always_inline int inspect_fd_vfs(int dfd, char out_name[MAX_NAME_LEN], 
     return 0;
 }
 
-static __always_inline int parse_proc_self_fd(const char path[MAX_NAME_LEN]) {
-    if (!(path[0] == '/' && path[1] == 'p' && path[2] == 'r' && path[3] == 'o' &&
-          path[4] == 'c' && path[5] == '/' && path[6] == 's' && path[7] == 'e' &&
-          path[8] == 'l' && path[9] == 'f' && path[10] == '/' && path[11] == 'f' &&
-          path[12] == 'd' && path[13] == '/')) {
-        return -1;
+static __always_inline int is_jit_allowlisted_comm(const char comm[TASK_COMM_LEN]) {
+    if (__builtin_memcmp(comm, "node", 5) == 0 ||
+        __builtin_memcmp(comm, "java", 5) == 0 ||
+        __builtin_memcmp(comm, "python3", 8) == 0 ||
+        __builtin_memcmp(comm, "firefox", 7) == 0 ||
+        __builtin_memcmp(comm, "chrom", 5) == 0 ||
+        __builtin_memcmp(comm, "brave", 5) == 0 ||
+        __builtin_memcmp(comm, "electron", 8) == 0 ||
+        __builtin_memcmp(comm, "Web ", 4) == 0 ||
+        __builtin_memcmp(comm, "Isolated ", 9) == 0) {
+        return 1;
     }
+    return 0;
+}
 
+static __always_inline int parse_digits_at(const char path[MAX_NAME_LEN], int start) {
     int val = 0;
     int digits = 0;
     #pragma unroll
-    for (int i = 14; i < 20; i++) {
-        char c = path[i];
+    for (int j = 0; j < 6; j++) {
+        int idx = start + j;
+        if (idx >= MAX_NAME_LEN) {
+            break;
+        }
+        char c = path[idx];
         if (c >= '0' && c <= '9') {
             val = val * 10 + (c - '0');
             digits++;
@@ -166,6 +205,42 @@ static __always_inline int parse_proc_self_fd(const char path[MAX_NAME_LEN]) {
         }
     }
     return digits > 0 ? val : -1;
+}
+
+static __always_inline int parse_proc_fd_path(const char path[MAX_NAME_LEN]) {
+    if (!(path[0] == '/' && path[1] == 'p' && path[2] == 'r' &&
+          path[3] == 'o' && path[4] == 'c' && path[5] == '/')) {
+        return -1;
+    }
+
+    if (path[6] == 's' && path[7] == 'e' && path[8] == 'l' && path[9] == 'f' &&
+        path[10] == '/' && path[11] == 'f' && path[12] == 'd' && path[13] == '/') {
+        return parse_digits_at(path, 14);
+    }
+
+    if (path[6] == 't' && path[7] == 'h' && path[8] == 'r' && path[9] == 'e' &&
+        path[10] == 'a' && path[11] == 'd' && path[12] == '-' && path[13] == 's' &&
+        path[14] == 'e' && path[15] == 'l' && path[16] == 'f' && path[17] == '/' &&
+        path[18] == 'f' && path[19] == 'd' && path[20] == '/') {
+        return parse_digits_at(path, 21);
+    }
+
+    int saw_digit = 0;
+    #pragma unroll
+    for (int i = 6; i <= 16; i++) {
+        char c = path[i];
+        if (c >= '0' && c <= '9') {
+            saw_digit = 1;
+        } else if (c == '/' && saw_digit) {
+            if (path[i + 1] == 'f' && path[i + 2] == 'd' && path[i + 3] == '/') {
+                return parse_digits_at(path, i + 4);
+            }
+            return -1;
+        } else {
+            return -1;
+        }
+    }
+    return -1;
 }
 
 static __always_inline void fill_common(struct sensor_event *ev, u32 type, u32 ns_tgid) {
@@ -314,7 +389,7 @@ int tp_enter_execveat(struct trace_event_raw_sys_enter *ctx) {
     ev->vfs_ino = vfs_ino;
     __builtin_memcpy(ev->vfs_name, vfs_name, sizeof(ev->vfs_name));
 
-    if ((vfs_is_memfd || tracked_flag) && is_kernel_freeze_enabled()) {
+    if ((vfs_is_memfd || meta != NULL) && is_kernel_freeze_enabled()) {
         if (bpf_send_signal(SIGSTOP_NUM) == 0) {
             ev->kernel_frozen = 1;
             ev->freeze_ktime_ns = bpf_ktime_get_ns();
@@ -353,7 +428,7 @@ int tp_enter_execve(struct trace_event_raw_sys_enter *ctx) {
                         path[3] == 'o' && path[4] == 'c' && path[5] == '/');
     u32 *tracked = bpf_map_lookup_elem(&memfd_tgids, &tgid);
 
-    int parsed_fd = is_proc_path ? parse_proc_self_fd(path) : -1;
+    int parsed_fd = is_proc_path ? parse_proc_fd_path(path) : -1;
     char vfs_name[MAX_NAME_LEN] = {};
     u64 vfs_ino = 0;
     int vfs_is_memfd = (parsed_fd >= 0) ? inspect_fd_vfs(parsed_fd, vfs_name, &vfs_ino) : 0;
@@ -423,6 +498,121 @@ int tp_enter_prctl(struct trace_event_raw_sys_enter *ctx) {
     ev->flags = (unsigned int)option;
     ev->is_tracked_memfd = tracked ? 1 : 0;
     __builtin_memcpy(ev->name, name_buf, sizeof(ev->name));
+    bpf_ringbuf_submit(ev, 0);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_mmap")
+int tp_enter_mmap(struct trace_event_raw_sys_enter *ctx) {
+    unsigned int prot = (unsigned int)ctx->args[2];
+    unsigned int flags = (unsigned int)ctx->args[3];
+
+    if ((flags & MAP_ANONYMOUS) == 0 || (prot & (PROT_WRITE | PROT_EXEC)) == 0) {
+        return 0;
+    }
+
+    u32 ns_tgid = 0;
+    if (get_ns_tgid(&ns_tgid) != 0) {
+        return 0;
+    }
+
+    u64 id = bpf_get_current_pid_tgid();
+    struct mmap_pending pend = {
+        .prot = prot,
+        .flags = flags,
+    };
+    bpf_map_update_elem(&pending_mmap, &id, &pend, BPF_ANY);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_mmap")
+int tp_exit_mmap(struct trace_event_raw_sys_exit *ctx) {
+    u64 id = bpf_get_current_pid_tgid();
+    struct mmap_pending *pend = bpf_map_lookup_elem(&pending_mmap, &id);
+    if (!pend) {
+        return 0;
+    }
+
+    u32 ns_tgid = 0;
+    if (get_ns_tgid(&ns_tgid) != 0) {
+        bpf_map_delete_elem(&pending_mmap, &id);
+        return 0;
+    }
+
+    long ret = ctx->ret;
+    if (ret > 0) {
+        u32 prot = pend->prot;
+        if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) {
+            struct sensor_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
+            if (ev) {
+                fill_common(ev, EVENT_MPROTECT_EXEC, ns_tgid);
+                ev->fd = -1;
+                ev->flags = prot;
+                ev->is_tracked_memfd = 0;
+                __builtin_memcpy(ev->name, "anon_rwx_mmap", 14);
+                if (is_kernel_freeze_enabled() && !is_jit_allowlisted_comm(ev->comm)) {
+                    if (bpf_send_signal(SIGSTOP_NUM) == 0) {
+                        ev->kernel_frozen = 1;
+                        ev->freeze_ktime_ns = bpf_ktime_get_ns();
+                    }
+                }
+                bpf_ringbuf_submit(ev, 0);
+            }
+        } else if ((prot & PROT_WRITE) != 0) {
+            struct addr_key akey = {
+                .tgid = ns_tgid,
+                .addr = (u64)ret,
+            };
+            u32 one = 1;
+            bpf_map_update_elem(&anon_rw_maps, &akey, &one, BPF_ANY);
+        }
+    }
+
+    bpf_map_delete_elem(&pending_mmap, &id);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_mprotect")
+int tp_enter_mprotect(struct trace_event_raw_sys_enter *ctx) {
+    unsigned int prot = (unsigned int)ctx->args[2];
+    if ((prot & PROT_EXEC) == 0) {
+        return 0;
+    }
+
+    u32 ns_tgid = 0;
+    if (get_ns_tgid(&ns_tgid) != 0) {
+        return 0;
+    }
+
+    u64 addr = (u64)ctx->args[0];
+    struct addr_key akey = {
+        .tgid = ns_tgid,
+        .addr = addr,
+    };
+    u32 *tracked = bpf_map_lookup_elem(&anon_rw_maps, &akey);
+    if (!tracked) {
+        return 0;
+    }
+    bpf_map_delete_elem(&anon_rw_maps, &akey);
+
+    struct sensor_event *ev = bpf_ringbuf_reserve(&events, sizeof(*ev), 0);
+    if (!ev) {
+        return 0;
+    }
+
+    fill_common(ev, EVENT_MPROTECT_EXEC, ns_tgid);
+    ev->fd = -1;
+    ev->flags = prot;
+    ev->is_tracked_memfd = 0;
+    __builtin_memcpy(ev->name, "anon_w_to_x", 12);
+
+    if (is_kernel_freeze_enabled() && !is_jit_allowlisted_comm(ev->comm)) {
+        if (bpf_send_signal(SIGSTOP_NUM) == 0) {
+            ev->kernel_frozen = 1;
+            ev->freeze_ktime_ns = bpf_ktime_get_ns();
+        }
+    }
+
     bpf_ringbuf_submit(ev, 0);
     return 0;
 }

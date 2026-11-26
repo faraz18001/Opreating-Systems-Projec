@@ -290,7 +290,7 @@ def svg_architecture_clean() -> str:
   <text x="111" y="34" text-anchor="middle" font-family="Noto Sans, Liberation Sans, sans-serif"
         font-size="7.6" font-weight="700" fill="#18141C">Untrusted Process</text>
   <text x="111" y="46" text-anchor="middle" font-family="Liberation Mono, DejaVu Sans Mono, monospace"
-        font-size="6.2" fill="#4A4F5D">memfd_create + execveat</text>
+        font-size="6.0" fill="#4A4F5D">memfd / W&#8594;X / SCM_RIGHTS</text>
   <text x="111" y="58" text-anchor="middle" font-family="Liberation Mono, DejaVu Sans Mono, monospace"
         font-size="6.0" fill="#7A808E">[kworker/u8:2] · 0 B disk</text>
 
@@ -308,19 +308,19 @@ def svg_architecture_clean() -> str:
   <text x="594" y="34" text-anchor="middle" font-family="Noto Sans, Liberation Sans, sans-serif"
         font-size="7.6" font-weight="700" fill="#3B404E">Dusk Web Console</text>
   <text x="594" y="46" text-anchor="middle" font-family="Liberation Mono, DejaVu Sans Mono, monospace"
-        font-size="6.2" fill="#646978">SSE / JSONL Ledger</text>
+        font-size="6.0" fill="#646978">SSE / Traces / Compare</text>
   <text x="594" y="58" text-anchor="middle" font-family="Noto Sans, Liberation Sans, sans-serif"
-        font-size="6.0" fill="#7A808E">Out-of-band (0 hot-path cost)</text>
+        font-size="5.9" fill="#7A808E">7-vec sweep · 0 hot-path cost</text>
 
   <!-- KERNEL SPACE COMPONENTS -->
   <!-- K1: CO-RE Tracepoints -->
   <rect x="40" y="132" width="142" height="54" fill="#FFFFFF" stroke="#5D2568" stroke-width="1.0"/>
   <text x="111" y="148" text-anchor="middle" font-family="Noto Sans, Liberation Sans, sans-serif"
-        font-size="7.6" font-weight="700" fill="#5D2568">CO-RE Tracepoints (6)</text>
+        font-size="7.6" font-weight="700" fill="#5D2568">CO-RE Tracepoints (9)</text>
   <text x="111" y="160" text-anchor="middle" font-family="Liberation Mono, DejaVu Sans Mono, monospace"
-        font-size="6.1" fill="#3B404E">memfd_create · execve(at)</text>
+        font-size="6.0" fill="#3B404E">memfd · execve(at) · mmap</text>
   <text x="111" y="172" text-anchor="middle" font-family="Liberation Mono, DejaVu Sans Mono, monospace"
-        font-size="6.1" fill="#3B404E">prctl · sched_process_fork</text>
+        font-size="6.0" fill="#3B404E">mprotect(X) · prctl · fork</text>
 
   <!-- K2: VFS fdtable Verifier & Sync Tripwire -->
   <rect x="242" y="132" width="194" height="54" fill="#FFFFFF" stroke="#5D2568" stroke-width="1.2"/>
@@ -329,7 +329,7 @@ def svg_architecture_clean() -> str:
   <text x="339" y="160" text-anchor="middle" font-family="Liberation Mono, DejaVu Sans Mono, monospace"
         font-size="6.1" fill="#18141C">current&#8594;files&#8594;fdt&#8594;fd[dfd]</text>
   <text x="339" y="172" text-anchor="middle" font-family="Liberation Mono, DejaVu Sans Mono, monospace"
-        font-size="6.1" fill="#5D2568">TMPFS_MAGIC + "memfd:" + inode</text>
+        font-size="6.0" fill="#5D2568">TMPFS + "memfd:" + W&#8594;X check</text>
 
   <!-- K3: BPF Ring Buffer & Maps -->
   <rect x="494" y="132" width="168" height="54" fill="#FFFFFF" stroke="#646978" stroke-width="0.9"/>
@@ -1023,7 +1023,7 @@ def build_html() -> str:
   <div class="kpi">
     <div class="kpi__num">100<span class="kpi__unit">%</span></div>
     <div class="kpi__label">Evasion Detection</div>
-    <div class="kpi__sub">All 5 vectors caught &middot; 0% Traditional FIM</div>
+    <div class="kpi__sub">5/5 measured (V1&ndash;V5) &middot; +V6/V7 wired</div>
   </div>
   <div class="kpi">
     <div class="kpi__num">0.0<span class="kpi__unit">%</span></div>
@@ -1127,7 +1127,7 @@ def build_html() -> str:
 
 <div class="sec-head sec-head--first">
   <h2><span class="num">III.</span> System Architecture &amp; Kernel Mechanics</h2>
-  <span class="sec-head__note">Adversarial C loader &middot; 6 CO-RE eBPF tracepoints &middot; Two-stage defense</span>
+  <span class="sec-head__note">Adversarial C loader &middot; 9 CO-RE eBPF tracepoints &middot; Two-stage defense</span>
 </div>
 
 <div class="prose-grid">
@@ -1144,23 +1144,23 @@ def build_html() -> str:
   <div class="prose-col">
     <h3>CO-RE VFS Verification &amp; Synchronous Freeze</h3>
     <p>
-      Rather than trusting mutable userspace descriptor numbers, MemGuard attaches six CO-RE tracepoints (<code>sys_enter/exit_memfd_create</code>, <code>sys_enter_execveat</code>, <code>sys_enter_execve</code>, <code>sys_enter_prctl</code>, <code>sched_process_fork</code>) with PID-namespace resolution via <code>bpf_get_ns_current_pid_tgid()</code>.
+      Rather than trusting mutable userspace descriptor numbers, MemGuard attaches nine CO-RE tracepoints (<code>sys_enter/exit_memfd_create</code>, <code>sys_enter_execveat</code>, <code>sys_enter_execve</code>, <code>sys_enter_prctl</code>, <code>sched_process_fork</code>, plus <code>sys_enter/exit_mmap</code> and <code>sys_enter_mprotect</code>) with PID-namespace resolution via <code>bpf_get_ns_current_pid_tgid()</code>.
     </p>
     <p>
-      On <code>execveat</code>&mdash;or via an unrolled parser for <code>execve("/proc/self/fd/&lt;N&gt;")</code>&mdash;the probe walks <code>current&rarr;files&rarr;fdt&rarr;fd[dfd]</code> via <code>BPF_CORE_READ</code>, verifies <code>TMPFS_MAGIC (0x01021994)</code> plus the kernel-assigned <code>memfd:</code> dentry prefix, records the exact kernel inode, and invokes <code>bpf_send_signal(SIGSTOP)</code> before returning to userspace.
+      On <code>execveat</code> (narrowed to <code>vfs_is_memfd || tracked_meta</code>)&mdash;or via an unrolled parser covering <code>/proc/self/fd/&lt;N&gt;</code>, <code>/proc/thread-self/fd/&lt;N&gt;</code>, and cross-process <code>/proc/&lt;pid&gt;/fd/&lt;N&gt;</code>&mdash;the probe walks <code>current&rarr;files&rarr;fdt&rarr;fd[dfd]</code> via <code>BPF_CORE_READ</code>, verifies <code>TMPFS_MAGIC (0x01021994)</code> plus the kernel-assigned <code>memfd:</code> dentry prefix, and invokes <code>bpf_send_signal(SIGSTOP)</code>. Separately, <code>mprotect(PROT_EXEC)</code> over anonymous <code>MAP_PRIVATE|MAP_ANONYMOUS</code> writable mappings emits <code>MPROTECT_EXEC</code> and freezes non-allowlisted callers, while Stage-2 auto-<code>SIGCONT</code> (<code>resume_process</code>) immediately releases any caller scored <code>ALLOW</code>.
     </p>
   </div>
 </div>
 
 <div class="fig-full">
   <div class="fig-title">Figure 3 <span class="dot">&middot;</span> Two-Stage Kernel Tripwire &amp; Asynchronous Forensics Architecture</div>
-  <div class="fig-sub">Stage 1 halts fileless execution synchronously at syscall entry (5.2 &mu;s); Stage 2 performs zero-pressure ELF64 RAM carving, dual-engine triage, and SSE telemetry</div>
+  <div class="fig-sub">Stage 1 halts fileless &amp; anonymous W&rarr;X execution synchronously at syscall entry (5.2 &mu;s on V1&ndash;V5); Stage 2 performs ELF64 carving, auto-SIGCONT recovery, and trace logging</div>
   <div class="fig-svg">{svg_architecture_clean()}</div>
 </div>
 
   <div class="sec-head">
-  <h2><span class="num">IV.</span> Five-Vector Evasion &amp; Empirical Blind Spots</h2>
-  <span class="sec-head__note">Compiled C loader (0 B disk I/O) &middot; 5 adversarial vectors</span>
+  <h2><span class="num">IV.</span> Seven-Vector Evasion &amp; Empirical Blind Spots</h2>
+  <span class="sec-head__note">0 B disk I/O &middot; V1&ndash;V5 measured, V6&ndash;V7 wired</span>
 </div>
 
 <table class="ledger">
@@ -1221,8 +1221,29 @@ def build_html() -> str:
       <td class="c">100%</td>
       <td class="c c-purple">100% (0 leaks)</td>
     </tr>
+    <tr>
+      <td class="c-muted">06</td>
+      <td><span class="key-ref">V6 &middot; mmap-exec</span></td>
+      <td>Anonymous W&rarr;X shellcode via <code>mmap(RW)</code> &rarr; <code>mprotect(RX)</code>; bypasses <code>memfd_create</code> and <code>execveat</code> entirely</td>
+      <td class="c c-alert">0%</td>
+      <td class="c c-alert">0% (unhooked)</td>
+      <td class="c c-alert">0% (OOD*)</td>
+      <td class="c c-purple">Hooked (MPROTECT_EXEC)*</td>
+    </tr>
+    <tr>
+      <td class="c-muted">07</td>
+      <td><span class="key-ref">V7 &middot; scm-fd</span></td>
+      <td>Cross-process Unix socket <code>SCM_RIGHTS</code> FD transfer + <code>execve("/proc/&lt;pid&gt;/fd/&lt;N&gt;")</code> after pre-memfd <code>fork()</code></td>
+      <td class="c c-alert">0%</td>
+      <td class="c c-alert">0% (no /proc/&lt;pid&gt;)</td>
+      <td class="c c-alert">0% (OOD*)</td>
+      <td class="c c-purple">Hooked (VFS fd walk)*</td>
+    </tr>
   </tbody>
 </table>
+<p style="font-size:6.9pt;color:#7A808E;margin-top:-4pt;margin-bottom:7pt;">
+  *V1&ndash;V5 cells reflect measured 80-trial runs on Linux 7.3.3-1-cachyos (4 trials/vector). V6 and V7 are newly implemented extensions verified standalone (0 B disk I/O, loopback C2) and via Heuristic/probe checks (score 75 FREEZE for <code>loader</code> vs. 15 ALLOW for <code>node</code>); live <code>sudo</code> sweeps are wired into <code>master_experiment.py</code> and <code>eval_evasion_zero_shot.py</code>.
+</p>
 
 <div class="prose-grid">
   <div class="prose-col">
@@ -1234,7 +1255,7 @@ def build_html() -> str:
   <div class="prose-col">
     <h3>Finding 2 &middot; Zero-Shot 100%-Real ML Generalization Drift</h3>
     <p>
-      Trained exclusively on 597 pure live eBPF rows (300 desktop benign + 297 real <code>execveat</code> attacks), our Random Forest achieved 1.00 F1 in-distribution yet dropped to <strong>0/3 (P=0.600 &lt; 0.75 freeze threshold)</strong> zero-shot on Vector 4 (<code>execve("/proc/self/fd/N")</code>), an unseen syscall pathway. Even after retraining with all vectors, userspace ML suffered 1/20 missed freeze due to a race-dropped <code>/proc</code> sample before exit. Structural VFS inspection eliminated both blind spots.
+      Trained exclusively on 597 pure live eBPF rows (300 desktop benign + 297 real <code>execveat</code> attacks), our Random Forest achieved 1.00 F1 in-distribution yet dropped to <strong>0/3 (P=0.600 &lt; 0.75 freeze threshold)</strong> zero-shot on Vector 4 (<code>execve("/proc/self/fd/N")</code>), an unseen syscall pathway. Even after retraining with all vectors, userspace ML suffered 1/20 missed freeze due to a race-dropped <code>/proc</code> sample before exit; similarly, V6 anonymous <code>W&rarr;X</code> shellcode omits <code>memfd_create</code> and <code>execveat</code> features completely, motivating our 9-probe kernel extension and Heuristic <code>anon_mprotect_exec</code> rule (75 pts) with an in-kernel JIT allowlist.
     </p>
   </div>
 </div>
@@ -1381,7 +1402,7 @@ def build_html() -> str:
 
 <div class="sec-head sec-head--first">
   <h2><span class="num">VII.</span> Live Interception Console &amp; Telemetry Surface</h2>
-  <span class="sec-head__note">Decoupled React/Vite + SSE operator console &middot; Zero hot-path coupling</span>
+  <span class="sec-head__note">React/Vite + SSE console &middot; Zero hot-path coupling</span>
 </div>
 
 <div class="fig-full">
@@ -1391,6 +1412,9 @@ def build_html() -> str:
     <img src="{dusk_uri}" alt="MemGuard live web console displaying frozen fileless execution and carved ELF64 forensics" />
   </div>
 </div>
+<p style="font-size:7.4pt;line-height:1.38;color:#2B2E38;margin-top:-3pt;margin-bottom:7pt;">
+  <strong>Interactive Telemetry &amp; Trace Extensions:</strong> The console adds (1)&nbsp;a one-click <strong>7-Vector Auto-Sweep</strong> (<code>Run all (7)</code>) that iterates sequentially across V1&ndash;V7 with abort control; (2)&nbsp;a darkened blurred-backdrop <strong>Heuristic vs. ML Comparison Modal</strong> (<code>Compare graphs</code>) overlapping per-event inference latency and MTTI series against the ~0.6&nbsp;ms exfiltration line; and (3)&nbsp;searchable <strong>per-iteration execution traces</strong> (<code>logs/traces/TRC-XXXX.json</code>, <code>Traces</code> tab, and click-to-open <code>TraceModal</code>) capturing non-blocking <code>stdout/stderr</code>, expanded parent/child PIDs, ordered kernel/classifier timelines, VFS inodes, and loopback C2 payloads.
+</p>
 
 <div class="sec-head">
   <h2><span class="num">VIII.</span> Discussion, Limitations &amp; Conclusion</h2>
@@ -1401,20 +1425,20 @@ def build_html() -> str:
   <div class="prose-col">
     <h3>Two-Stage Hybrid Architecture</h3>
     <p>
-      Mirroring the latency-capability bottleneck observed in local LLM EDR agents [5], our results show that high userspace classification accuracy alone is operationally insufficient against compiled sub-millisecond payloads. Our data establishes an optimal two-stage architecture: (1)&nbsp;synchronous in-kernel VFS <code>bpf_send_signal(SIGSTOP)</code> acts as a ~5&nbsp;&mu;s tripwire that eliminates the TOCTOU exfiltration race; (2)&nbsp;once frozen, asynchronous userspace Heuristic + shadow ML triage and ELF64 carving operate with zero time pressure, resuming rare benign callers via <code>SIGCONT</code> while terminating confirmed implants via <code>SIGKILL</code>.
+      Mirroring the latency-capability bottleneck observed in local LLM EDR agents [5], our results show that high userspace classification accuracy alone is operationally insufficient against sub-millisecond in-memory payloads. Our data establishes an optimal two-stage architecture: (1)&nbsp;synchronous in-kernel VFS <code>bpf_send_signal(SIGSTOP)</code> acts as a ~5&nbsp;&mu;s tripwire that eliminates the TOCTOU exfiltration race; (2)&nbsp;once frozen, asynchronous userspace Heuristic + shadow ML triage and ELF64 carving operate with zero time pressure, automatically resuming benign callers via Stage-2 <code>SIGCONT</code> while terminating confirmed implants via <code>SIGKILL</code>.
     </p>
     <h3>Limitations</h3>
     <p>
-      Our live benign corpus reflects a single Arch Linux desktop rather than multi-tenant container hosts where runtimes (<code>runc</code>) routinely re-exec via <code>/proc/self/fd</code>. Additionally, adversaries using userland reflective ELF loaders (<code>mmap(PROT_EXEC)</code>) or <code>ptrace</code>/<code>process_vm_writev</code> injection bypass <code>execveat()</code> entirely and sit outside the current hook surface.
+      Our live benign corpus reflects a single Arch Linux desktop rather than multi-tenant container hosts where runtimes (<code>runc</code>) routinely re-exec via <code>/proc/self/fd</code>. While the 9-probe surface now covers anonymous <code>mprotect(PROT_EXEC)</code> and cross-process <code>SCM_RIGHTS</code> transfers, remote <code>ptrace</code>/<code>process_vm_writev</code> injection, abuse inside JIT-allowlisted runtimes (<code>node</code>/browsers), and un-swept live V6/V7 <code>sudo</code> benchmark runs remain open boundaries.
     </p>
   </div>
   <div class="prose-col">
     <h3>Conclusion &amp; Future Work</h3>
     <p>
-      This work empirically confirms that an autonomous CO-RE eBPF defender reliably intercepts fileless in-memory execution (<code>memfd_create</code> + <code>fexecve</code>) and anonymous process masquerading with <strong>0 bytes of disk artifacts</strong> and <strong>0.0% false positives</strong> across five evasion vectors, overcoming both the total blindness (0%) and disk I/O penalty (+19.6%) of traditional <code>inotify</code> FIM. Only synchronous in-kernel VFS enforcement (<strong>5.2&nbsp;&mu;s mean MTTI</strong>, <strong>23.9&nbsp;MB RSS</strong>) defeats fast TCP exfiltration (<strong>0/20 leaks</strong> vs. 20/20 in userspace Heuristic/ML) while preserving volatile RAM for full ELF64 forensic recovery.
+      This work empirically confirms that an autonomous CO-RE eBPF defender reliably intercepts fileless in-memory execution and anonymous process masquerading with <strong>0 bytes of disk artifacts</strong> and <strong>0.0% false positives</strong> across the measured 5-vector 80-trial suite, overcoming both the total blindness (0%) and disk I/O penalty (+19.6%) of traditional <code>inotify</code> FIM. Only synchronous in-kernel enforcement (<strong>5.2&nbsp;&mu;s mean MTTI</strong>, <strong>23.9&nbsp;MB RSS</strong>) defeats fast TCP exfiltration (<strong>0/20 leaks</strong> vs. 20/20 in userspace Heuristic/ML) while preserving volatile RAM for ELF64 forensics, trace auditing, and operator inspection.
     </p>
     <p>
-      Future work will migrate enforcement to Linux Security Module (BPF LSM) <code>bprm_check_security</code> hooks for pre-exec denial, add <code>mmap</code>/<code>mprotect(PROT_EXEC)</code> and <code>ptrace</code> probes against reflective loaders, and compile Decision Tree thresholds into fixed-point eBPF maps for zero-copy in-kernel ML scoring.
+      Future work will migrate enforcement to Linux Security Module (BPF LSM) <code>bprm_check_security</code> hooks for pre-exec denial, add <code>ptrace</code> probes against cross-process memory writes, run the full 7-vector live benchmark to retrain the ML model with <code>mprotect_exec</code> features, and compile Decision Tree thresholds into fixed-point eBPF maps for zero-copy in-kernel ML scoring.
     </p>
   </div>
 </div>

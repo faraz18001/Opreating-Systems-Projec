@@ -29,6 +29,8 @@ VECTORS = [
     ("fork", ["--fork", "--ticks", "1"]),
     ("execve-fd", ["--execve-fd", "--ticks", "1"]),
     ("high-entropy", ["--high-entropy", "--ticks", "1"]),
+    ("mmap-exec", ["--mmap-exec", "--ticks", "1"]),
+    ("scm-fd", ["--scm-fd", "--ticks", "1"]),
 ]
 
 
@@ -69,7 +71,7 @@ def eval_vector(name: str, extra_args: list, runs: int = 3) -> dict:
             while time.monotonic() < deadline:
                 ready, _, _ = select.select([fd], [], [], 0.02)
                 if not ready:
-                    if p.poll() is not None and name != "fork" and (run_heur_hit or run_ml_hit):
+                    if p.poll() is not None and name not in ("fork", "scm-fd") and (run_heur_hit or run_ml_hit):
                         break
                     continue
                 chunk = os.read(fd, 8192)
@@ -88,7 +90,12 @@ def eval_vector(name: str, extra_args: list, runs: int = 3) -> dict:
                     ev_type = ev.get("type", "")
                     comm = ev.get("comm", "")
                     ev_name = ev.get("name", "")
-                    if comm not in ("loader", "[kworker/u8:2]") and "jit_cache" not in ev_name and "/proc/self/fd" not in ev_name:
+                    if (
+                        ev_type != "mprotect_exec"
+                        and comm not in ("loader", "[kworker/u8:2]")
+                        and "jit_cache" not in ev_name
+                        and "/proc/" not in ev_name
+                    ):
                         continue
 
                     pid = int(ev["pid"])
@@ -101,7 +108,7 @@ def eval_vector(name: str, extra_args: list, runs: int = 3) -> dict:
                     hv = heur_clf.evaluate(ev, ctx)
                     mv = ml_clf.evaluate(ev, ctx)
 
-                    if ev_type in ("execveat", "execve_fd"):
+                    if ev_type in ("execveat", "execve_fd", "mprotect_exec"):
                         exec_events_seen += 1
                         if ctx.entropy is not None:
                             entropies.append(ctx.entropy)

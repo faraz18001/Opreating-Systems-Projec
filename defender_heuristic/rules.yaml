@@ -8,6 +8,7 @@ weights:
   tracked_memfd_execveat: 70
   untracked_empty_path_execveat: 45
   proc_fd_execve: 70
+  anon_mprotect_exec: 75
   memfd_deleted_exe: 20
   high_entropy: 25
   kthread_masquerade: 45
@@ -39,6 +40,7 @@ allowlist_comms:
   - chrome
   - brave
   - electron
+  - node
   - runc
   - systemd
   - systemd-executor
