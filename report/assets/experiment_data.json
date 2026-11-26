@@ -4,10 +4,10 @@
   "trials": {
     "traditional_fim": {
       "mode": "traditional_fim",
-      "total_trials": 20,
+      "total_trials": 28,
       "total_frozen": 0,
       "detection_pct": 0.0,
-      "total_leaks": 20,
+      "total_leaks": 28,
       "leak_pct": 100.0,
       "fpr_pct": 0.0,
       "mtti_mean_ms": null,
@@ -15,19 +15,19 @@
     },
     "userspace_heur": {
       "mode": "userspace_heur",
-      "total_trials": 20,
-      "total_frozen": 20,
+      "total_trials": 28,
+      "total_frozen": 28,
       "detection_pct": 100.0,
-      "total_leaks": 20,
+      "total_leaks": 28,
       "leak_pct": 100.0,
       "benign_trials": 10,
       "benign_fp": 0,
       "fpr_pct": 0.0,
-      "mtti_mean_ms": 3.7708,
-      "mtti_median_ms": 3.3795,
-      "mtti_min_ms": 1.264,
-      "mtti_max_ms": 7.024,
-      "rss_mb": 23.97,
+      "mtti_mean_ms": 2.7654,
+      "mtti_median_ms": 2.9395,
+      "mtti_min_ms": 0.552,
+      "mtti_max_ms": 6.117,
+      "rss_mb": 23.99,
       "per_vector": {
         "standard": {
           "trials": 4,
@@ -50,6 +50,16 @@
           "leaks": 4
         },
         "high-entropy": {
+          "trials": 4,
+          "frozen": 4,
+          "leaks": 4
+        },
+        "mmap-exec": {
+          "trials": 4,
+          "frozen": 4,
+          "leaks": 4
+        },
+        "scm-fd": {
           "trials": 4,
           "frozen": 4,
           "leaks": 4
@@ -59,23 +69,23 @@
     },
     "userspace_ml": {
       "mode": "userspace_ml",
-      "total_trials": 20,
-      "total_frozen": 19,
-      "detection_pct": 95.0,
-      "total_leaks": 20,
+      "total_trials": 28,
+      "total_frozen": 24,
+      "detection_pct": 85.7,
+      "total_leaks": 28,
       "leak_pct": 100.0,
       "benign_trials": 10,
       "benign_fp": 0,
       "fpr_pct": 0.0,
-      "mtti_mean_ms": 11.0891,
-      "mtti_median_ms": 10.63,
-      "mtti_min_ms": 6.966,
-      "mtti_max_ms": 17.315,
-      "rss_mb": 130.07,
+      "mtti_mean_ms": 10.2585,
+      "mtti_median_ms": 8.7535,
+      "mtti_min_ms": 6.88,
+      "mtti_max_ms": 18.894,
+      "rss_mb": 130.28,
       "per_vector": {
         "standard": {
           "trials": 4,
-          "frozen": 3,
+          "frozen": 4,
           "leaks": 4
         },
         "dup-fd": {
@@ -94,6 +104,16 @@
           "leaks": 4
         },
         "high-entropy": {
+          "trials": 4,
+          "frozen": 4,
+          "leaks": 4
+        },
+        "mmap-exec": {
+          "trials": 4,
+          "frozen": 0,
+          "leaks": 4
+        },
+        "scm-fd": {
           "trials": 4,
           "frozen": 4,
           "leaks": 4
@@ -103,19 +123,19 @@
     },
     "inkernel_vfs": {
       "mode": "inkernel_vfs",
-      "total_trials": 20,
-      "total_frozen": 20,
+      "total_trials": 28,
+      "total_frozen": 28,
       "detection_pct": 100.0,
       "total_leaks": 0,
       "leak_pct": 0.0,
       "benign_trials": 10,
       "benign_fp": 0,
       "fpr_pct": 0.0,
-      "mtti_mean_ms": 0.0052,
-      "mtti_median_ms": 0.0026,
-      "mtti_min_ms": 0.0022,
-      "mtti_max_ms": 0.0504,
-      "rss_mb": 23.88,
+      "mtti_mean_ms": 0.0032,
+      "mtti_median_ms": 0.0029,
+      "mtti_min_ms": 0.0023,
+      "mtti_max_ms": 0.0056,
+      "rss_mb": 23.98,
       "per_vector": {
         "standard": {
           "trials": 4,
@@ -141,13 +161,23 @@
           "trials": 4,
           "frozen": 4,
           "leaks": 0
+        },
+        "mmap-exec": {
+          "trials": 4,
+          "frozen": 4,
+          "leaks": 0
+        },
+        "scm-fd": {
+          "trials": 4,
+          "frozen": 4,
+          "leaks": 0
         }
       },
       "sample_forensics": {
-        "pid": 22032,
+        "pid": 80536,
         "vfs_name": "memfd:jit_cache",
-        "vfs_ino": 4958,
-        "mtti_ms": 0.0023,
+        "vfs_ino": 26814,
+        "mtti_ms": 0.0025,
         "entropy": 2.6709,
         "forensics": {
           "size_bytes": 16832,
@@ -166,7 +196,7 @@
             "[kworker/u8:2]",
             "OS_FALL2026_MEMFD_TOKEN"
           ],
-          "bundle": "evidence/pid_22032_20261126_122927"
+          "bundle": "evidence/pid_80536_20261126_173927"
         }
       }
     }
@@ -174,51 +204,51 @@
   "overhead": [
     {
       "config": "Baseline (None)",
-      "memfd_us": 5.329,
-      "fs_us": 38.645,
+      "memfd_us": 1.91,
+      "fs_us": 10.569,
       "rss_mb": 0.0,
       "memfd_delta_pct": 0.0,
       "fs_delta_pct": 0.0
     },
     {
       "config": "Traditional FIM (inotify)",
-      "memfd_us": 5.11,
-      "fs_us": 46.23,
+      "memfd_us": 2.214,
+      "fs_us": 20.102,
       "rss_mb": 19.2,
-      "memfd_delta_pct": -4.1,
-      "fs_delta_pct": 19.6
+      "memfd_delta_pct": 15.9,
+      "fs_delta_pct": 90.2
     },
     {
       "config": "eBPF Heuristic (Userspace)",
-      "memfd_us": 5.426,
-      "fs_us": 48.979,
-      "rss_mb": 23.61,
-      "memfd_delta_pct": 1.8,
-      "fs_delta_pct": 26.7
+      "memfd_us": 6.556,
+      "fs_us": 34.895,
+      "rss_mb": 23.57,
+      "memfd_delta_pct": 243.2,
+      "fs_delta_pct": 230.2
     },
     {
       "config": "eBPF ML (Random Forest)",
-      "memfd_us": 7.208,
-      "fs_us": 45.095,
+      "memfd_us": 2.407,
+      "fs_us": 11.274,
       "rss_mb": 129.62,
-      "memfd_delta_pct": 35.3,
-      "fs_delta_pct": 16.7
+      "memfd_delta_pct": 26.0,
+      "fs_delta_pct": 6.7
     },
     {
       "config": "eBPF In-Kernel VFS",
-      "memfd_us": 3.425,
-      "fs_us": 17.1,
-      "rss_mb": 23.57,
-      "memfd_delta_pct": -35.7,
-      "fs_delta_pct": -55.8
+      "memfd_us": 2.515,
+      "fs_us": 10.411,
+      "rss_mb": 23.54,
+      "memfd_delta_pct": 31.7,
+      "fs_delta_pct": -1.5
     }
   ],
-  "disk_io_stdout": "[loader] executing sealed memfd payload (pid=22118 fd=3 size=16832 bytes)\n[payload] pid=22118 ppid=22117 comm=[kworker/u8:2] exe=/memfd:jit_cache (deleted)\n[payload] heartbeat 1/2 (pid=22118)\n[payload] heartbeat 2/2 (pid=22118)\n[payload] completed without interception\n\nDisk I/O verification for pid=22118:\n  physical write_bytes : 0 bytes\n  physical read_bytes  : 0 bytes\n  logical wchar (RAM)  : 17060 bytes\nResult: PASS (0 bytes written to physical disk)",
-  "fim_stdout": "Traditional FIM (inotify) watching: /tmp, /dev/shm, /home/faraz/Projects/osproject/red_team/build\n[loader] executing sealed memfd payload (pid=22128 fd=3 size=16832 bytes)\n[payload] pid=22128 ppid=22127 comm=[kworker/u8:2] exe=/memfd:jit_cache (deleted)\n[payload] heartbeat 1/1 (pid=22128)\n[payload] completed without interception\n\nTraditional FIM finished in 502.4 ms\n  total unrelated fs events : 0\n  fileless payload detected : 0 (traditional FIM is blind to memfd)",
+  "disk_io_stdout": "[loader] executing sealed memfd payload (pid=80652 fd=3 size=16832 bytes)\n[payload] pid=80652 ppid=80651 comm=[kworker/u8:2] exe=/memfd:jit_cache (deleted)\n[payload] heartbeat 1/2 (pid=80652)\n[payload] heartbeat 2/2 (pid=80652)\n[payload] completed without interception\n\nDisk I/O verification for pid=80652:\n  physical write_bytes : 0 bytes\n  physical read_bytes  : 0 bytes\n  logical wchar (RAM)  : 17060 bytes\nResult: PASS (0 bytes written to physical disk)",
+  "fim_stdout": "Traditional FIM (inotify) watching: /tmp, /dev/shm, /home/faraz/Projects/osproject/red_team/build\n[loader] executing sealed memfd payload (pid=80662 fd=3 size=16832 bytes)\n[payload] pid=80662 ppid=80661 comm=[kworker/u8:2] exe=/memfd:jit_cache (deleted)\n[payload] heartbeat 1/1 (pid=80662)\n[payload] completed without interception\n\nTraditional FIM finished in 502.6 ms\n  total unrelated fs events : 0\n  fileless payload detected : 0 (traditional FIM is blind to memfd)",
   "ml_metrics": {
     "selected_model": "random_forest",
     "selected_label": "Random Forest",
-    "trained_at": "2026-11-25 17:35:19",
+    "trained_at": "2026-11-26 17:38:52",
     "thresholds": {
       "alert": 0.45,
       "freeze": 0.75
@@ -243,7 +273,7 @@
         "recall": 1.0,
         "f1": 1.0,
         "fpr": 0.0,
-        "avg_infer_ms": 1.3888,
+        "avg_infer_ms": 1.4146,
         "confusion_matrix": {
           "tn": 64,
           "fp": 0,
@@ -259,7 +289,7 @@
         "recall": 1.0,
         "f1": 1.0,
         "fpr": 0.0,
-        "avg_infer_ms": 0.0653,
+        "avg_infer_ms": 0.0703,
         "confusion_matrix": {
           "tn": 64,
           "fp": 0,
@@ -275,7 +305,7 @@
         "recall": 1.0,
         "f1": 1.0,
         "fpr": 0.0,
-        "avg_infer_ms": 0.2545,
+        "avg_infer_ms": 0.2177,
         "confusion_matrix": {
           "tn": 64,
           "fp": 0,
@@ -291,7 +321,7 @@
         "recall": 1.0,
         "f1": 1.0,
         "fpr": 0.0,
-        "avg_infer_ms": 0.4826,
+        "avg_infer_ms": 0.4707,
         "confusion_matrix": {
           "tn": 64,
           "fp": 0,

@@ -1,7 +1,7 @@
 {
   "selected_model": "random_forest",
   "selected_label": "Random Forest",
-  "trained_at": "2026-11-25 17:35:19",
+  "trained_at": "2026-11-26 17:38:52",
   "thresholds": {
     "alert": 0.45,
     "freeze": 0.75
@@ -26,7 +26,7 @@
       "recall": 1.0,
       "f1": 1.0,
       "fpr": 0.0,
-      "avg_infer_ms": 1.3888,
+      "avg_infer_ms": 1.4146,
       "confusion_matrix": {
         "tn": 64,
         "fp": 0,
@@ -42,7 +42,7 @@
       "recall": 1.0,
       "f1": 1.0,
       "fpr": 0.0,
-      "avg_infer_ms": 0.0653,
+      "avg_infer_ms": 0.0703,
       "confusion_matrix": {
         "tn": 64,
         "fp": 0,
@@ -58,7 +58,7 @@
       "recall": 1.0,
       "f1": 1.0,
       "fpr": 0.0,
-      "avg_infer_ms": 0.2545,
+      "avg_infer_ms": 0.2177,
       "confusion_matrix": {
         "tn": 64,
         "fp": 0,
@@ -74,7 +74,7 @@
       "recall": 1.0,
       "f1": 1.0,
       "fpr": 0.0,
-      "avg_infer_ms": 0.4826,
+      "avg_infer_ms": 0.4707,
       "confusion_matrix": {
         "tn": 64,
         "fp": 0,

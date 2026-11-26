@@ -37,10 +37,14 @@ def read_img_b64(path: Path, mime: str) -> str:
 def svg_mtti_bars(data: dict) -> str:
     """Figure 1: Swiss-editorial log-scale vertical bar chart of MTTI vs TCP exfil boundary."""
     tr = data["trials"]
+    n_mode = tr["inkernel_vfs"]["total_trials"]
+    ml_ms = tr["userspace_ml"]["mtti_mean_ms"]
+    hr_ms = tr["userspace_heur"]["mtti_mean_ms"]
+    kv_ms = tr["inkernel_vfs"]["mtti_mean_ms"]
     bars = [
-        ("Userspace\nML (RF)", tr["userspace_ml"]["mtti_mean_ms"], "11.09 ms", "#B4B8C5", "#5A6070"),
-        ("Userspace\nHeuristic", tr["userspace_heur"]["mtti_mean_ms"], "3.77 ms", "#8F6A9A", "#5D2568"),
-        ("In-Kernel\nVFS eBPF", tr["inkernel_vfs"]["mtti_mean_ms"], "5.2 \u03bcs", "#5D2568", "#5D2568"),
+        ("Userspace\nML (RF)", ml_ms, f"{ml_ms:.2f} ms", "#B4B8C5", "#5A6070"),
+        ("Userspace\nHeuristic", hr_ms, f"{hr_ms:.2f} ms", "#8F6A9A", "#5D2568"),
+        ("In-Kernel\nVFS eBPF", kv_ms, f"{kv_ms * 1000:.1f} \u03bcs", "#5D2568", "#5D2568"),
     ]
     # Log10 y-axis from 1e-3 ms (1 us) to 1e2 ms (100 ms) -> 5 decades
     y_top, y_bot = 26.0, 148.0
@@ -65,7 +69,7 @@ def svg_mtti_bars(data: dict) -> str:
         '<rect x="44" y="4" width="6.5" height="6.5" fill="#5D2568"/>',
         '<text x="54" y="10.2" font-family="Noto Sans, Liberation Sans, sans-serif" font-size="6.8" fill="#5A6070">In-Kernel VFS (0 leaks)</text>',
         '<rect x="148" y="4" width="6.5" height="6.5" fill="#B4B8C5"/>',
-        '<text x="158" y="10.2" font-family="Noto Sans, Liberation Sans, sans-serif" font-size="6.8" fill="#5A6070">Userspace (20/20 leaks)</text>',
+        f'<text x="158" y="10.2" font-family="Noto Sans, Liberation Sans, sans-serif" font-size="6.8" fill="#5A6070">Userspace ({n_mode}/{n_mode} leaks)</text>',
     ]
 
     for val, lbl in ticks:
@@ -109,8 +113,8 @@ def svg_mtti_bars(data: dict) -> str:
             )
 
     p.append(
-        '<text x="316" y="187" text-anchor="end" font-family="Noto Sans, Liberation Sans, sans-serif" '
-        'font-size="6.2" fill="#8A909E">*Traditional FIM (inotify): 0/20 detected (unbounded)</text>'
+        f'<text x="316" y="187" text-anchor="end" font-family="Noto Sans, Liberation Sans, sans-serif" '
+        f'font-size="6.2" fill="#8A909E">*Traditional FIM (inotify): 0/{n_mode} detected (unbounded)</text>'
     )
     p.append("</svg>")
     return "\n".join(p)
@@ -119,13 +123,17 @@ def svg_mtti_bars(data: dict) -> str:
 def svg_ranked_classification(data: dict) -> str:
     """Figure 2: Swiss-editorial horizontal ranked bars matching reference Fig. 2."""
     models = {m["key"]: m["avg_infer_ms"] for m in data["ml_metrics"]["models"]}
+    kv_ms = data["trials"]["inkernel_vfs"]["mtti_mean_ms"]
+    rf_ms = models["random_forest"]
+    heur_speedup = rf_ms / 0.040
+    vfs_speedup = round(rf_ms / kv_ms)
     items = [
-        ("In-Kernel VFS Tripwire", 0.0052, "5.2 \u03bcs (0 leaks)", "#5D2568", True),
+        ("In-Kernel VFS Tripwire", kv_ms, f"{kv_ms * 1000:.1f} \u03bcs (0 leaks)", "#5D2568", True),
         ("Heuristic (rules.yaml)", 0.040, "0.040 ms", "#5D2568", True),
         ("Decision Tree (depth=4)", models["decision_tree"], f"{models['decision_tree']:.3f} ms", "#7C5288", False),
         ("Logistic Regression", models["logistic_regression"], f"{models['logistic_regression']:.3f} ms", "#9AA0B0", False),
         ("K-Nearest Neighbors (k=5)", models["knn"], f"{models['knn']:.3f} ms", "#B4B8C5", False),
-        ("Random Forest (100 trees)", models["random_forest"], f"{models['random_forest']:.3f} ms", "#B4B8C5", False),
+        ("Random Forest (100 trees)", rf_ms, f"{rf_ms:.3f} ms", "#B4B8C5", False),
     ]
     max_val = 1.50
     x_bar = 114.0
@@ -156,8 +164,8 @@ def svg_ranked_classification(data: dict) -> str:
         )
 
     p.append(
-        '<text x="328" y="187" text-anchor="end" font-family="Noto Sans, Liberation Sans, sans-serif" '
-        'font-size="6.2" fill="#8A909E">Heuristic is 34.7\u00d7 faster than Random Forest; VFS tripwire is 267\u00d7 faster</text>'
+        f'<text x="328" y="187" text-anchor="end" font-family="Noto Sans, Liberation Sans, sans-serif" '
+        f'font-size="6.2" fill="#8A909E">Heuristic is {heur_speedup:.1f}\u00d7 faster than Random Forest; VFS tripwire is {vfs_speedup}\u00d7 faster</text>'
     )
     p.append("</svg>")
     return "\n".join(p)
@@ -251,9 +259,9 @@ def svg_architecture() -> str:
 </svg>"""
 
 
-def svg_architecture_clean() -> str:
+def svg_architecture_clean(kv_us: float = 3.2, n_mode: int = 28) -> str:
     """Authentic USENIX/OSDI-style orthogonal systems architecture diagram (zero vibecoded cards)."""
-    return """<svg viewBox="0 0 680 218" xmlns="http://www.w3.org/2000/svg">
+    return f"""<svg viewBox="0 0 680 218" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <marker id="ar-k" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto">
       <path d="M0,1 L7,4 L0,7 z" fill="#2E1135"/>
@@ -358,7 +366,7 @@ def svg_architecture_clean() -> str:
   <circle cx="208" cy="118" r="6.5" fill="#5D2568"/>
   <text x="208" y="120.3" text-anchor="middle" font-family="Noto Sans, Liberation Sans, sans-serif" font-size="6.5" font-weight="700" fill="#FFFFFF">3</text>
   <text x="208" y="93" text-anchor="middle" font-family="Liberation Mono, DejaVu Sans Mono, monospace" font-size="6.2" font-weight="700" fill="#5D2568">bpf_send_signal(SIGSTOP)</text>
-  <text x="208" y="102" text-anchor="middle" font-family="Noto Sans, Liberation Sans, sans-serif" font-size="6.0" fill="#5D2568">5.2 &#956;s sync freeze (pre-exfil)</text>
+  <text x="208" y="102" text-anchor="middle" font-family="Noto Sans, Liberation Sans, sans-serif" font-size="6.0" fill="#5D2568">{kv_us:.1f} &#956;s sync freeze (pre-exfil)</text>
 
   <!-- Step 4: K2 -> K3 (Emit event) -> U2 (Ringbuf consume) -->
   <line x1="436" y1="159" x2="492" y2="159" stroke="#646978" stroke-width="1.0" marker-end="url(#ar-g)"/>
@@ -382,7 +390,7 @@ def svg_architecture_clean() -> str:
 
   <!-- Bottom step legend strip -->
   <text x="40" y="206" font-family="Noto Sans, Liberation Sans, sans-serif" font-size="6.1" fill="#5A6070">
-    <tspan font-weight="700" fill="#2E1135">Critical Path (&#9312;&#8594;&#9313;&#8594;&#9314;):</tspan> Synchronous in-kernel VFS freeze (5.2 &#956;s, 0/20 leaks)
+    <tspan font-weight="700" fill="#2E1135">Critical Path (&#9312;&#8594;&#9313;&#8594;&#9314;):</tspan> Synchronous in-kernel VFS freeze ({kv_us:.1f} &#956;s, 0/{n_mode} leaks)
     <tspan dx="18" font-weight="700" fill="#646978">Async Stage (&#9315;&#8594;&#9316;&#8594;&#9317;):</tspan> Non-blocking triage, RAM ELF64 carving &amp; operator UI
   </text>
 </svg>"""
@@ -506,10 +514,30 @@ def build_html() -> str:
 
     speedup_heur = round(u_h["mtti_mean_ms"] / k_v["mtti_mean_ms"])
     speedup_ml = round(u_m["mtti_mean_ms"] / k_v["mtti_mean_ms"])
+    n_mode = k_v["total_trials"]
+    total_attack_trials = sum(tr[m]["total_trials"] for m in ("traditional_fim", "userspace_heur", "userspace_ml", "inkernel_vfs"))
+    n_vectors = len(k_v.get("per_vector", {})) or 7
+    kv_us = k_v["mtti_mean_ms"] * 1000.0
+    kv_med_us = k_v["mtti_median_ms"] * 1000.0
     sha_full = f_inner.get("sha256") or "4ff2b2595e30b6787bc3d9359b75d60ce4067752f1b96c78de8271392d6395f9"
     sha_short = sha_full[:24]
-    vfs_ino = forensics.get("vfs_ino", 4958)
+    vfs_ino = forensics.get("vfs_ino", 26814)
+    forensic_pid = forensics.get("pid", 80536)
+    forensic_mtti_us = round(forensics.get("mtti_ms", 0.0025) * 1000.0, 1)
     elf_size = f_inner.get("size_bytes", 16832)
+
+    import re
+    dio_match = re.search(r"pid=(\d+)", data.get("disk_io_stdout", ""))
+    dio_pid = dio_match.group(1) if dio_match else "80652"
+    fim_ms_match = re.search(r"finished in ([0-9.]+) ms", data.get("fim_stdout", ""))
+    fim_ms_txt = fim_ms_match.group(1) if fim_ms_match else "502.6"
+
+    ov = {row["config"]: row for row in data.get("overhead", [])}
+    ov_base = ov.get("Baseline (None)", {"memfd_us": 1.91, "fs_us": 10.57})
+    ov_fim = ov.get("Traditional FIM (inotify)", {"memfd_us": 2.21, "fs_us": 20.10, "fs_delta_pct": 90.2, "rss_mb": 19.2})
+    ov_heur = ov.get("eBPF Heuristic (Userspace)", {"memfd_us": 6.56, "fs_us": 34.90, "memfd_delta_pct": 243.2, "rss_mb": 23.6})
+    ov_ml = ov.get("eBPF ML (Random Forest)", {"memfd_us": 2.41, "fs_us": 11.27, "memfd_delta_pct": 26.0, "fs_delta_pct": 6.7, "rss_mb": 129.6})
+    ov_kv = ov.get("eBPF In-Kernel VFS", {"memfd_us": 2.52, "fs_us": 10.41, "fs_delta_pct": -1.5, "rss_mb": 23.5})
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -1004,26 +1032,26 @@ def build_html() -> str:
   <div class="masthead__right">
     <div class="masthead__authors">M. Murtaza &middot; S. Faraz &middot; A. Baig &middot; S. Humayun</div>
     <div class="masthead__meta-line">Instructors: B. Wajid, Z. Iqbal, S. Tahir, A. S. Shaikh</div>
-    <div class="masthead__meta-line">Corpus: 80 Attack Trials &middot; 330 Benign Events</div>
-    <div class="masthead__env">Linux 7.3.3-1-cachyos &middot; CO-RE eBPF &middot; libbpf 1.8</div>
+    <div class="masthead__meta-line">Corpus: {total_attack_trials} Attack Trials ({n_vectors} Vectors) &middot; 330 Benign Events</div>
+    <div class="masthead__env">Linux {data.get('kernel', '7.3.3-1-cachyos')} &middot; CO-RE eBPF &middot; libbpf 1.8</div>
   </div>
 </div>
 
 <div class="kpi-strip">
   <div class="kpi">
-    <div class="kpi__num kpi__num--purple">{k_v['mtti_mean_ms'] * 1000:.1f}<span class="kpi__unit"> &mu;s</span></div>
+    <div class="kpi__num kpi__num--purple">{kv_us:.1f}<span class="kpi__unit"> &mu;s</span></div>
     <div class="kpi__label">In-Kernel Mean MTTI</div>
-    <div class="kpi__sub">{k_v['mtti_median_ms'] * 1000:.1f} &mu;s median &middot; {speedup_heur}&times; faster than userspace</div>
+    <div class="kpi__sub">{kv_med_us:.1f} &mu;s median &middot; {speedup_heur}&times; faster than userspace</div>
   </div>
   <div class="kpi">
-    <div class="kpi__num kpi__num--purple">0<span class="kpi__unit"> / 20</span></div>
+    <div class="kpi__num kpi__num--purple">0<span class="kpi__unit"> / {n_mode}</span></div>
     <div class="kpi__label">C2 Exfiltration Leaks</div>
-    <div class="kpi__sub">0% leaked vs. 20/20 (100%) in userspace &amp; FIM</div>
+    <div class="kpi__sub">0% leaked vs. {n_mode}/{n_mode} (100%) in userspace &amp; FIM</div>
   </div>
   <div class="kpi">
     <div class="kpi__num">100<span class="kpi__unit">%</span></div>
     <div class="kpi__label">Evasion Detection</div>
-    <div class="kpi__sub">5/5 measured (V1&ndash;V5) &middot; +V6/V7 wired</div>
+    <div class="kpi__sub">All {n_vectors}/{n_vectors} vectors (V1&ndash;V7) &middot; 0% FIM</div>
   </div>
   <div class="kpi">
     <div class="kpi__num">0.0<span class="kpi__unit">%</span></div>
@@ -1039,12 +1067,12 @@ def build_html() -> str:
 
   <div class="sec-head">
   <h2><span class="num">I.</span> Research Question &amp; Benchmark Summary</h2>
-  <span class="sec-head__note">80 attack trials &middot; 30 benign trials &middot; 300 live desktop captures</span>
+  <span class="sec-head__note">{total_attack_trials} attack trials ({n_vectors} vectors) &middot; 30 benign trials &middot; 300 live desktop captures</span>
 </div>
 
 <p class="lead">
   <strong>Research Question:</strong> <em>Can an autonomous eBPF-driven defender reliably detect and intercept fileless in-memory execution (<code>memfd_create</code> + <code>fexecve</code>) and anonymous process masquerading without disk artifacts, and what is its classification overhead compared to traditional file-integrity monitoring?</em>
-  Traditional path-based monitors (<code>inotify</code>, <code>auditd</code>) are structurally blind to anonymous RAM descriptors sealed via <code>fcntl(F_ADD_SEALS)</code> and masqueraded as <code>[kworker/u8:2]</code> via <code>prctl(PR_SET_NAME)</code>. While userspace eBPF classifiers achieve 95&ndash;100% post-hoc detection, ring-buffer wakeup and <code>/proc</code> polling consume 3.77&ndash;11.09&nbsp;ms&mdash;losing the Time-of-Check to Time-of-Use (TOCTOU) race against a ~0.6&nbsp;ms compiled TCP exfiltration payload. Moving VFS <code>fdtable/dentry</code> verification and <code>bpf_send_signal(SIGSTOP)</code> directly into the kernel cuts mean MTTI to <strong>5.2&nbsp;&mu;s</strong>, blocks <strong>100% of exfiltration</strong> at <strong>23.9&nbsp;MB RSS</strong>, and preserves volatile RAM for live ELF64 forensic carving.
+  Traditional path-based monitors (<code>inotify</code>, <code>auditd</code>) are structurally blind to anonymous RAM descriptors sealed via <code>fcntl(F_ADD_SEALS)</code>, cross-process <code>SCM_RIGHTS</code> handoffs, and anonymous <code>mmap(RW)&rarr;mprotect(RX)</code> shellcode masqueraded as <code>[kworker/u8:2]</code>. While userspace eBPF classifiers achieve {u_m['detection_pct']:.1f}&ndash;100% post-hoc detection, ring-buffer wakeup and <code>/proc</code> polling consume {u_h['mtti_mean_ms']:.2f}&ndash;{u_m['mtti_mean_ms']:.2f}&nbsp;ms&mdash;losing the Time-of-Check to Time-of-Use (TOCTOU) race against a ~0.6&nbsp;ms compiled TCP exfiltration payload. Moving VFS <code>fdtable/dentry</code> and <code>W&rarr;X</code> verification plus <code>bpf_send_signal(SIGSTOP)</code> into the kernel cuts mean MTTI to <strong>{kv_us:.1f}&nbsp;&mu;s</strong>, blocks <strong>100% of exfiltration ({k_v['total_leaks']}/{n_mode} leaks)</strong> at <strong>{k_v['rss_mb']:.1f}&nbsp;MB RSS</strong>, and preserves volatile RAM for live ELF64 forensic carving.
 </p>
 
 <table class="ledger">
@@ -1064,40 +1092,40 @@ def build_html() -> str:
     <tr>
       <td><span class="swatch" style="background:#B4B8C5"></span><strong>01 &middot; Traditional FIM</strong></td>
       <td><code>inotify</code> on <code>/tmp</code>, <code>/dev/shm</code>, build</td>
-      <td class="r c-alert">0/20 (0%)</td>
+      <td class="r c-alert">{fim['total_frozen']}/{n_mode} ({fim['detection_pct']:.0f}%)</td>
       <td class="r c-muted">&mdash;</td>
       <td class="r c-muted">&mdash;</td>
-      <td class="r c-alert">20/20 (100%)</td>
+      <td class="r c-alert">{fim['total_leaks']}/{n_mode} ({fim['leak_pct']:.0f}%)</td>
       <td class="r">0.0%</td>
       <td class="r">{fim['rss_mb']:.1f} MB</td>
     </tr>
     <tr>
       <td><span class="swatch" style="background:#9AA0B0"></span><strong>02 &middot; Userspace eBPF + ML</strong></td>
       <td>Ringbuf + Random Forest + <code>pidfd</code></td>
-      <td class="r">19/20 (95%)</td>
+      <td class="r">{u_m['total_frozen']}/{n_mode} ({u_m['detection_pct']:.1f}%)</td>
       <td class="r">{u_m['mtti_mean_ms']:.2f} ms</td>
       <td class="r">{u_m['mtti_median_ms']:.2f} ms</td>
-      <td class="r c-alert">20/20 (100%)</td>
+      <td class="r c-alert">{u_m['total_leaks']}/{n_mode} ({u_m['leak_pct']:.0f}%)</td>
       <td class="r">0.0%</td>
       <td class="r c-alert">{u_m['rss_mb']:.1f} MB</td>
     </tr>
     <tr>
       <td><span class="swatch" style="background:#8F6A9A"></span><strong>03 &middot; Userspace eBPF + Heuristic</strong></td>
       <td>Ringbuf + <code>rules.yaml</code> + <code>pidfd</code></td>
-      <td class="r">20/20 (100%)</td>
+      <td class="r">{u_h['total_frozen']}/{n_mode} ({u_h['detection_pct']:.0f}%)</td>
       <td class="r">{u_h['mtti_mean_ms']:.2f} ms</td>
       <td class="r">{u_h['mtti_median_ms']:.2f} ms</td>
-      <td class="r c-alert">20/20 (100%)</td>
+      <td class="r c-alert">{u_h['total_leaks']}/{n_mode} ({u_h['leak_pct']:.0f}%)</td>
       <td class="r">0.0%</td>
       <td class="r">{u_h['rss_mb']:.1f} MB</td>
     </tr>
     <tr class="highlight">
       <td><span class="swatch" style="background:#5D2568"></span>04 &middot; In-Kernel VFS eBPF</td>
-      <td>CO-RE VFS walk + <code>bpf_send_signal</code></td>
-      <td class="r c-purple">20/20 (100%)</td>
-      <td class="r c-purple">{k_v['mtti_mean_ms'] * 1000:.1f} &mu;s</td>
-      <td class="r c-purple">{k_v['mtti_median_ms'] * 1000:.1f} &mu;s</td>
-      <td class="r c-purple">0/20 (0%)</td>
+      <td>CO-RE VFS + W&rarr;X + <code>bpf_send_signal</code></td>
+      <td class="r c-purple">{k_v['total_frozen']}/{n_mode} ({k_v['detection_pct']:.0f}%)</td>
+      <td class="r c-purple">{kv_us:.1f} &mu;s</td>
+      <td class="r c-purple">{kv_med_us:.1f} &mu;s</td>
+      <td class="r c-purple">{k_v['total_leaks']}/{n_mode} ({k_v['leak_pct']:.0f}%)</td>
       <td class="r c-purple">0.0%</td>
       <td class="r c-purple">{k_v['rss_mb']:.1f} MB</td>
     </tr>
@@ -1112,7 +1140,7 @@ def build_html() -> str:
 <div class="fig-pair">
   <div class="fig-cell">
     <div class="fig-title">Figure 1 <span class="dot">&middot;</span> Interception Latency vs. Exfiltration Window</div>
-    <div class="fig-sub">Mean Time to Intercept across 80 trials relative to TCP exfiltration (~0.6 ms)</div>
+    <div class="fig-sub">Mean Time to Intercept across {total_attack_trials} trials relative to TCP exfiltration (~0.6 ms)</div>
     <div class="fig-svg">{svg_mtti_bars(data)}</div>
   </div>
   <div class="fig-cell">
@@ -1138,7 +1166,7 @@ def build_html() -> str:
     </p>
     <div class="eq-inline">T<sub>MTTI</sub> = T<sub>hook</sub> + T<sub>ringbuf</sub> + T<sub>classify</sub> + T<sub>signal</sub> &lt; T<sub>exfil</sub></div>
     <p>
-      When classification resides in userspace, ring-buffer delivery, <code>/proc</code> polling, and Python/ML scoring push <code>T_MTTI</code> to 3.77&ndash;11.09&nbsp;ms, whereas a compiled C payload opens a loopback socket and transmits secrets in ~0.6&nbsp;ms. Synchronous in-kernel enforcement collapses <code>T_ringbuf + T_classify</code> to zero on the critical path.
+      When classification resides in userspace, ring-buffer delivery, <code>/proc</code> polling, and Python/ML scoring push <code>T_MTTI</code> to {u_h['mtti_mean_ms']:.2f}&ndash;{u_m['mtti_mean_ms']:.2f}&nbsp;ms, whereas a compiled C payload opens a loopback socket and transmits secrets in ~0.6&nbsp;ms. Synchronous in-kernel enforcement collapses <code>T_ringbuf + T_classify</code> to zero on the critical path.
     </p>
   </div>
   <div class="prose-col">
@@ -1154,13 +1182,13 @@ def build_html() -> str:
 
 <div class="fig-full">
   <div class="fig-title">Figure 3 <span class="dot">&middot;</span> Two-Stage Kernel Tripwire &amp; Asynchronous Forensics Architecture</div>
-  <div class="fig-sub">Stage 1 halts fileless &amp; anonymous W&rarr;X execution synchronously at syscall entry (5.2 &mu;s on V1&ndash;V5); Stage 2 performs ELF64 carving, auto-SIGCONT recovery, and trace logging</div>
-  <div class="fig-svg">{svg_architecture_clean()}</div>
+  <div class="fig-sub">Stage 1 halts fileless &amp; anonymous W&rarr;X execution synchronously at syscall entry ({kv_us:.1f} &mu;s across V1&ndash;V7); Stage 2 performs ELF64 carving, auto-SIGCONT recovery, and trace logging</div>
+  <div class="fig-svg">{svg_architecture_clean(kv_us, n_mode)}</div>
 </div>
 
   <div class="sec-head">
   <h2><span class="num">IV.</span> Seven-Vector Evasion &amp; Empirical Blind Spots</h2>
-  <span class="sec-head__note">0 B disk I/O &middot; V1&ndash;V5 measured, V6&ndash;V7 wired</span>
+  <span class="sec-head__note">0 B disk I/O &middot; All 7 vectors measured live ({total_attack_trials} trials + 21 zero-shot)</span>
 </div>
 
 <table class="ledger">
@@ -1227,8 +1255,8 @@ def build_html() -> str:
       <td>Anonymous W&rarr;X shellcode via <code>mmap(RW)</code> &rarr; <code>mprotect(RX)</code>; bypasses <code>memfd_create</code> and <code>execveat</code> entirely</td>
       <td class="c c-alert">0%</td>
       <td class="c c-alert">0% (unhooked)</td>
-      <td class="c c-alert">0% (OOD*)</td>
-      <td class="c c-purple">Hooked (MPROTECT_EXEC)*</td>
+      <td class="c c-alert">0% (P=0.00)</td>
+      <td class="c c-purple">100% (0 leaks)</td>
     </tr>
     <tr>
       <td class="c-muted">07</td>
@@ -1236,13 +1264,13 @@ def build_html() -> str:
       <td>Cross-process Unix socket <code>SCM_RIGHTS</code> FD transfer + <code>execve("/proc/&lt;pid&gt;/fd/&lt;N&gt;")</code> after pre-memfd <code>fork()</code></td>
       <td class="c c-alert">0%</td>
       <td class="c c-alert">0% (no /proc/&lt;pid&gt;)</td>
-      <td class="c c-alert">0% (OOD*)</td>
-      <td class="c c-purple">Hooked (VFS fd walk)*</td>
+      <td class="c c-alert">0% (P=0.60)</td>
+      <td class="c c-purple">100% (0 leaks)</td>
     </tr>
   </tbody>
 </table>
 <p style="font-size:6.9pt;color:#7A808E;margin-top:-4pt;margin-bottom:7pt;">
-  *V1&ndash;V5 cells reflect measured 80-trial runs on Linux 7.3.3-1-cachyos (4 trials/vector). V6 and V7 are newly implemented extensions verified standalone (0 B disk I/O, loopback C2) and via Heuristic/probe checks (score 75 FREEZE for <code>loader</code> vs. 15 ALLOW for <code>node</code>); live <code>sudo</code> sweeps are wired into <code>master_experiment.py</code> and <code>eval_evasion_zero_shot.py</code>.
+  All V1&ndash;V7 cells reflect live <code>sudo</code> sweeps on Linux {data.get('kernel', '7.3.3-1-cachyos')} ({n_mode} trials/mode = {total_attack_trials} attack trials in <code>master_experiment.py</code> plus 21 zero-shot trials in <code>eval_evasion_zero_shot.py</code>). Both VFS-hardened Heuristic and In-Kernel VFS caught 100% of V1&ndash;V7, with only In-Kernel VFS blocking 100% of C2 exfiltration (0/{n_mode} leaks).
 </p>
 
 <div class="prose-grid">
@@ -1255,7 +1283,7 @@ def build_html() -> str:
   <div class="prose-col">
     <h3>Finding 2 &middot; Zero-Shot 100%-Real ML Generalization Drift</h3>
     <p>
-      Trained exclusively on 597 pure live eBPF rows (300 desktop benign + 297 real <code>execveat</code> attacks), our Random Forest achieved 1.00 F1 in-distribution yet dropped to <strong>0/3 (P=0.600 &lt; 0.75 freeze threshold)</strong> zero-shot on Vector 4 (<code>execve("/proc/self/fd/N")</code>), an unseen syscall pathway. Even after retraining with all vectors, userspace ML suffered 1/20 missed freeze due to a race-dropped <code>/proc</code> sample before exit; similarly, V6 anonymous <code>W&rarr;X</code> shellcode omits <code>memfd_create</code> and <code>execveat</code> features completely, motivating our 9-probe kernel extension and Heuristic <code>anon_mprotect_exec</code> rule (75 pts) with an in-kernel JIT allowlist.
+      Trained on 597 pure live eBPF rows (300 desktop benign + 297 real <code>execveat</code> attacks), our Random Forest achieved 1.00 F1 in-distribution yet dropped to <strong>0/3</strong> zero-shot on three out-of-distribution syscall paths: Vector 4 (<code>execve("/proc/self/fd/N")</code>, P=0.600), Vector 7 (<code>SCM_RIGHTS /proc/&lt;pid&gt;/fd</code>, P=0.600), and Vector 6 (<code>mmap W&rarr;X</code>, P=0.000, 0/4 in live sweep as it omits <code>memfd_create</code>/<code>execveat</code> features entirely). Our 9-probe kernel VFS + <code>MPROTECT_EXEC</code> layer and Heuristic <code>anon_mprotect_exec</code> rule (75 pts) caught all 7 vectors at 100%.
     </p>
   </div>
 </div>
@@ -1297,29 +1325,29 @@ def build_html() -> str:
     <tr>
       <td>Baseline (No Defender)</td>
       <td>3,000-op syscall bench</td>
-      <td class="r">5.33 &mu;s</td>
-      <td class="r">38.65 &mu;s (0.0%)</td>
+      <td class="r">{ov_base['memfd_us']:.2f} &mu;s</td>
+      <td class="r">{ov_base['fs_us']:.2f} &mu;s (0.0%)</td>
       <td class="r c-muted">&mdash;</td>
       <td class="r c-muted">&mdash;</td>
       <td class="r">0.0 MB</td>
     </tr>
     <tr>
       <td>Traditional FIM (<code>inotify</code>)</td>
-      <td>3,000-op + 20 attacks</td>
-      <td class="r">5.11 &mu;s</td>
-      <td class="r c-alert">46.23 &mu;s (+19.6%)</td>
+      <td>3,000-op + {n_mode} attacks</td>
+      <td class="r">{ov_fim['memfd_us']:.2f} &mu;s</td>
+      <td class="r c-alert">{ov_fim['fs_us']:.2f} &mu;s (+{ov_fim['fs_delta_pct']:.1f}%)</td>
       <td class="r c-muted">N/A (0% det)</td>
       <td class="r c-alert">0.00 / 0.0%</td>
-      <td class="r">19.2 MB</td>
+      <td class="r">{fim['rss_mb']:.1f} MB</td>
     </tr>
     <tr>
       <td>eBPF Userspace Heuristic</td>
-      <td><code>rules.yaml</code> (597 live)</td>
-      <td class="r">5.43 &mu;s (+1.8%)</td>
-      <td class="r">48.98 &mu;s</td>
+      <td><code>rules.yaml</code> ({n_mode} attacks)</td>
+      <td class="r">{ov_heur['memfd_us']:.2f} &mu;s</td>
+      <td class="r">{ov_heur['fs_us']:.2f} &mu;s</td>
       <td class="r">0.040 ms</td>
       <td class="r">1.00 / 0.0%</td>
-      <td class="r">24.0 MB</td>
+      <td class="r">{u_h['rss_mb']:.1f} MB</td>
     </tr>
     <tr>
       <td>eBPF ML &middot; Decision Tree</td>
@@ -1341,31 +1369,31 @@ def build_html() -> str:
     </tr>
     <tr>
       <td>eBPF ML &middot; Random Forest (Live)</td>
-      <td>3,000-op + 20 attacks</td>
-      <td class="r">7.21 &mu;s (+35.3%)</td>
-      <td class="r">45.10 &mu;s (+16.7%)</td>
+      <td>3,000-op + {n_mode} attacks</td>
+      <td class="r">{ov_ml['memfd_us']:.2f} &mu;s (+{ov_ml['memfd_delta_pct']:.1f}%)</td>
+      <td class="r">{ov_ml['fs_us']:.2f} &mu;s (+{ov_ml['fs_delta_pct']:.1f}%)</td>
       <td class="r">{ml_models['random_forest']['avg_infer_ms']:.3f} ms</td>
       <td class="r">1.00 / 0.0%</td>
-      <td class="r c-alert">130.1 MB</td>
+      <td class="r c-alert">{u_m['rss_mb']:.1f} MB</td>
     </tr>
     <tr class="highlight">
       <td>eBPF In-Kernel VFS (<code>SIGSTOP</code>)</td>
-      <td>3,000-op + 80-trial suite</td>
-      <td class="r c-purple">3.43 &mu;s*</td>
-      <td class="r c-purple">17.10 &mu;s*</td>
-      <td class="r c-purple">5.2 &mu;s (E2E)</td>
+      <td>3,000-op + {total_attack_trials}-trial suite</td>
+      <td class="r c-purple">{ov_kv['memfd_us']:.2f} &mu;s</td>
+      <td class="r c-purple">{ov_kv['fs_us']:.2f} &mu;s ({ov_kv['fs_delta_pct']:+.1f}%)</td>
+      <td class="r c-purple">{kv_us:.1f} &mu;s (E2E)</td>
       <td class="r c-purple">1.00 / 0.0%</td>
-      <td class="r c-purple">23.9 MB</td>
+      <td class="r c-purple">{k_v['rss_mb']:.1f} MB</td>
     </tr>
   </tbody>
 </table>
 <p style="font-size:6.9pt;color:#7A808E;margin-top:-4pt;margin-bottom:9pt;">
-  *Syscall latency measured on Intel Core i9-11950H (CachyOS 7.3.3); negative deltas under In-Kernel VFS reflect warm CPU frequency scaling (turbo governor) confirming zero measurable disk-path regression, whereas <code>inotify</code> FIM incurs a consistent +19.6% disk-create penalty while detecting 0% of fileless attacks.
+  Syscall latency measured on Intel Core i9-11950H (CachyOS 7.3.3, 3,000 cooled ops). In-Kernel VFS adds virtually zero disk-path latency ({ov_kv['fs_delta_pct']:+.1f}% on file create/unlink) while blocking 100% of attacks, whereas <code>inotify</code> FIM inflates disk create/unlink latency by +{ov_fim['fs_delta_pct']:.1f}% while detecting 0% of fileless payloads.
 </p>
 
   <div class="sec-head">
   <h2><span class="num">VI.</span> Zero-Disk Proof &amp; RAM Forensic Carving</h2>
-  <span class="sec-head__note">Live /proc/&lt;pid&gt;/io &amp; /proc/&lt;pid&gt;/exe capture on PID 22032</span>
+  <span class="sec-head__note">Live /proc/&lt;pid&gt;/io &amp; /proc/&lt;pid&gt;/exe capture on PID {forensic_pid}</span>
 </div>
 
 <p>
@@ -1374,10 +1402,10 @@ def build_html() -> str:
 
 <div class="spec-grid">
   <div class="spec-col">
-    <h3>Live Carved RAM Artifact (Frozen PID 22032)</h3>
+    <h3>Live Carved RAM Artifact (Frozen PID {forensic_pid})</h3>
     <table class="kv">
       <tr><td class="k">Kernel VFS Proof</td><td class="v">memfd:jit_cache (tmpfs, inode #{vfs_ino})</td></tr>
-      <tr><td class="k">Freeze Latency</td><td class="v">2.3 &mu;s via bpf_send_signal(SIGSTOP)</td></tr>
+      <tr><td class="k">Freeze Latency</td><td class="v">{forensic_mtti_us:.1f} &mu;s via bpf_send_signal(SIGSTOP)</td></tr>
       <tr><td class="k">Carved Binary</td><td class="v">{elf_size:,} B ELF64 (ET_DYN, x86_64, entry 0x1650)</td></tr>
       <tr><td class="k">ELF Layout</td><td class="v">15 program segments &middot; 31 sections &middot; H=2.67 bits/B</td></tr>
       <tr><td class="k">SHA-256 Digest</td><td class="v">{sha_short}&hellip;{sha_full[-8:]}</td></tr>
@@ -1385,14 +1413,14 @@ def build_html() -> str:
     </table>
   </div>
   <div class="spec-col">
-    <h3>Zero-Disk Execution Proof (PID 22118)</h3>
+    <h3>Zero-Disk Execution Proof (PID {dio_pid})</h3>
     <table class="kv">
       <tr><td class="k">Masqueraded Comm</td><td class="v">[kworker/u8:2] (via prctl PR_SET_NAME)</td></tr>
       <tr><td class="k">Kernel Exe Link</td><td class="v">/memfd:jit_cache (deleted)</td></tr>
-      <tr><td class="k">Physical Write I/O</td><td class="v" style="color:#5D2568;font-weight:700">0 bytes (/proc/22118/io write_bytes)</td></tr>
-      <tr><td class="k">Physical Read I/O</td><td class="v" style="color:#5D2568;font-weight:700">0 bytes (/proc/22118/io read_bytes)</td></tr>
+      <tr><td class="k">Physical Write I/O</td><td class="v" style="color:#5D2568;font-weight:700">0 bytes (/proc/{dio_pid}/io write_bytes)</td></tr>
+      <tr><td class="k">Physical Read I/O</td><td class="v" style="color:#5D2568;font-weight:700">0 bytes (/proc/{dio_pid}/io read_bytes)</td></tr>
       <tr><td class="k">Logical RAM Write</td><td class="v">17,060 bytes (wchar to tmpfs memfd)</td></tr>
-      <tr><td class="k">FIM Observation</td><td class="v" style="color:#A8422A;font-weight:600">0 inotify events over 502.4 ms (100% blind)</td></tr>
+      <tr><td class="k">FIM Observation</td><td class="v" style="color:#A8422A;font-weight:600">0 inotify events over {fim_ms_txt} ms (100% blind)</td></tr>
     </table>
   </div>
 </div>
@@ -1425,20 +1453,20 @@ def build_html() -> str:
   <div class="prose-col">
     <h3>Two-Stage Hybrid Architecture</h3>
     <p>
-      Mirroring the latency-capability bottleneck observed in local LLM EDR agents [5], our results show that high userspace classification accuracy alone is operationally insufficient against sub-millisecond in-memory payloads. Our data establishes an optimal two-stage architecture: (1)&nbsp;synchronous in-kernel VFS <code>bpf_send_signal(SIGSTOP)</code> acts as a ~5&nbsp;&mu;s tripwire that eliminates the TOCTOU exfiltration race; (2)&nbsp;once frozen, asynchronous userspace Heuristic + shadow ML triage and ELF64 carving operate with zero time pressure, automatically resuming benign callers via Stage-2 <code>SIGCONT</code> while terminating confirmed implants via <code>SIGKILL</code>.
+      Mirroring the latency-capability bottleneck observed in local LLM EDR agents [5], our results show that high userspace classification accuracy alone is operationally insufficient against sub-millisecond in-memory payloads. Our data establishes an optimal two-stage architecture: (1)&nbsp;synchronous in-kernel VFS + <code>W&rarr;X</code> <code>bpf_send_signal(SIGSTOP)</code> acts as a ~{kv_us:.1f}&nbsp;&mu;s tripwire that eliminates the TOCTOU exfiltration race; (2)&nbsp;once frozen, asynchronous userspace Heuristic + shadow ML triage and ELF64 carving operate with zero time pressure, automatically resuming benign callers via Stage-2 <code>SIGCONT</code> while terminating confirmed implants via <code>SIGKILL</code>.
     </p>
     <h3>Limitations</h3>
     <p>
-      Our live benign corpus reflects a single Arch Linux desktop rather than multi-tenant container hosts where runtimes (<code>runc</code>) routinely re-exec via <code>/proc/self/fd</code>. While the 9-probe surface now covers anonymous <code>mprotect(PROT_EXEC)</code> and cross-process <code>SCM_RIGHTS</code> transfers, remote <code>ptrace</code>/<code>process_vm_writev</code> injection, abuse inside JIT-allowlisted runtimes (<code>node</code>/browsers), and un-swept live V6/V7 <code>sudo</code> benchmark runs remain open boundaries.
+      Our live benign corpus reflects a single Arch Linux desktop rather than multi-tenant container hosts where runtimes (<code>runc</code>) routinely re-exec via <code>/proc/self/fd</code>. While our 9-probe surface now catches and blocks anonymous <code>mprotect(PROT_EXEC)</code> (V6) and cross-process <code>SCM_RIGHTS</code> transfers (V7) at 100%, remote <code>ptrace</code>/<code>process_vm_writev</code> injection and malicious abuse inside JIT-allowlisted runtimes (<code>node</code>/browsers) remain open boundaries.
     </p>
   </div>
   <div class="prose-col">
     <h3>Conclusion &amp; Future Work</h3>
     <p>
-      This work empirically confirms that an autonomous CO-RE eBPF defender reliably intercepts fileless in-memory execution and anonymous process masquerading with <strong>0 bytes of disk artifacts</strong> and <strong>0.0% false positives</strong> across the measured 5-vector 80-trial suite, overcoming both the total blindness (0%) and disk I/O penalty (+19.6%) of traditional <code>inotify</code> FIM. Only synchronous in-kernel enforcement (<strong>5.2&nbsp;&mu;s mean MTTI</strong>, <strong>23.9&nbsp;MB RSS</strong>) defeats fast TCP exfiltration (<strong>0/20 leaks</strong> vs. 20/20 in userspace Heuristic/ML) while preserving volatile RAM for ELF64 forensics, trace auditing, and operator inspection.
+      This work empirically confirms that an autonomous CO-RE eBPF defender reliably intercepts fileless in-memory execution, anonymous <code>W&rarr;X</code> shellcode, and process masquerading with <strong>0 bytes of disk artifacts</strong> and <strong>0.0% false positives</strong> across all <strong>{n_vectors} evasion vectors ({total_attack_trials} live attack trials)</strong>, overcoming both the total blindness (0%) and disk I/O penalty (+{ov_fim['fs_delta_pct']:.1f}%) of traditional <code>inotify</code> FIM. Only synchronous in-kernel enforcement (<strong>{kv_us:.1f}&nbsp;&mu;s mean MTTI</strong>, <strong>{k_v['rss_mb']:.1f}&nbsp;MB RSS</strong>) defeats fast TCP exfiltration (<strong>0/{n_mode} leaks</strong> vs. {n_mode}/{n_mode} in userspace Heuristic/ML) while preserving volatile RAM for ELF64 forensics, trace auditing, and operator inspection.
     </p>
     <p>
-      Future work will migrate enforcement to Linux Security Module (BPF LSM) <code>bprm_check_security</code> hooks for pre-exec denial, add <code>ptrace</code> probes against cross-process memory writes, run the full 7-vector live benchmark to retrain the ML model with <code>mprotect_exec</code> features, and compile Decision Tree thresholds into fixed-point eBPF maps for zero-copy in-kernel ML scoring.
+      Future work will migrate enforcement to Linux Security Module (BPF LSM) <code>bprm_check_security</code> hooks for pre-exec denial, add <code>ptrace</code>/<code>process_vm_writev</code> probes against cross-process memory writes, retrain the ML pipeline with native <code>mprotect_exec</code> features to close V6 zero-shot drift, and compile Decision Tree thresholds into fixed-point eBPF maps for zero-copy in-kernel ML scoring.
     </p>
   </div>
 </div>
@@ -1467,7 +1495,7 @@ def build_html() -> str:
 
 <div class="colophon">
   <span>MemGuard &middot; M. Murtaza, S. Faraz, A. Baig, S. Humayun &middot; Habib University</span>
-  <span>Compiled from 80 Live Attack Trials &middot; 330 Benign Events &middot; 597 Pure eBPF Dataset Rows</span>
+  <span>Compiled from {total_attack_trials} Live Attack Trials ({n_vectors} Vectors) &middot; 330 Benign Events &middot; 597 Pure eBPF Dataset Rows</span>
 </div>
 
 </body>
