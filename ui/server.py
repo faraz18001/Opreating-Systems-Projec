@@ -145,14 +145,19 @@ class DefenderController:
             return
         try:
             with open(self.log_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()[-200:]
-            for idx, line in enumerate(lines, start=1):
+                raw_lines = f.readlines()[-1200:]
+            parsed = []
+            for line in raw_lines:
                 try:
-                    rec = json.loads(line)
-                    rec["id"] = idx
-                    self.events.append(rec)
+                    parsed.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
+            threats = [r for r in parsed if r.get("action") != "ALLOW"][-60:]
+            benign = [r for r in parsed if r.get("action") == "ALLOW"][-180:]
+            merged = sorted(threats + benign, key=lambda r: r.get("epoch", 0))
+            for idx, rec in enumerate(merged, start=1):
+                rec["id"] = idx
+                self.events.append(rec)
         except OSError:
             pass
 
@@ -463,6 +468,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -632,6 +638,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mime or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 

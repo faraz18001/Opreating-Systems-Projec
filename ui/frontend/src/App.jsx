@@ -49,7 +49,12 @@ export default function App() {
       const res = await fetch("/api/events");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      setEvents(data.events || []);
+      const loadedEvents = data.events || [];
+      setEvents(loadedEvents);
+      if (new URLSearchParams(window.location.search).get("expand") === "first") {
+        const latestFrozen = [...loadedEvents].reverse().find((e) => e.action === "FROZEN");
+        if (latestFrozen) setExpandedId(latestFrozen.id);
+      }
       setQuarantine(data.quarantine || []);
       setC2Leaks(data.c2_leaks || []);
       setStatus(data.status || null);
@@ -62,6 +67,9 @@ export default function App() {
 
   useEffect(() => {
     refreshSnapshot();
+    if (new URLSearchParams(window.location.search).get("static") === "1") {
+      return undefined;
+    }
     const sse = new EventSource("/api/stream");
 
     sse.addEventListener("telemetry", (e) => {
